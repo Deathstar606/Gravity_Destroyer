@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run BGR Training",
+      "type": "shell",
+      "command": "wsl",
+      "args": [
+        "-d",
+        "Ubuntu-22.04",
+        "--",
+        "bash",
+        "-ic",
+        "echo 905907 | sudo -S sysctl -w kernel.core_pattern=/dev/null && source /home/deathstar/miniconda3/etc/profile.d/conda.sh && conda activate dingorep && cd /home/deathstar/dingorep/dingo-T1/01_paper_settings/01_training/03_training && dingo_train --settings_file train_settings.yaml --train_dir ./xpu_training_run"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

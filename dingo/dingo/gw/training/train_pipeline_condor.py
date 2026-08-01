@@ -1,0 +1,266 @@
+import os
+import sys
+from os.path import join, isfile
+import yaml
+import argparse
+
+from dingo.core.utils import document_git_status, document_environment
+from dingo.core.utils.torchutils import document_gpus
+from dingo.gw.training.train_pipeline import run_training, run_multi_gpu_training
+
+
+def create_submission_file(
+    train_dir: str, condor_settings: dict, filename: str = "submission_file.sub"
+):
+    """
+    Creates submission file and writes it to filename.
+
+    Parameters
+    ----------
+    train_dir: str
+        Path to training directory
+    condor_settings: dict
+        Condor settings
+    filename: str
+        Filename of submission file
+    """
+    lines = []
+    # getenv required for GPU training because wandb needs $HOME to be defined
+    lines.append(f"getenv = True\n")
+    lines.append(f'executable = {condor_settings["executable"]}\n')
+    if "request_disk" in condor_settings:
+        lines.append(f'request_disk = {condor_settings["request_disk"]}\n')
+    if "num_cpus" in condor_settings:
+        lines.append(f'request_cpus = {condor_settings["num_cpus"]}\n')
+    if "memory_cpus" in condor_settings:
+        lines.append(f'request_memory = {condor_settings["memory_cpus"]}\n')
+    # Collect requirements
+    requirements = ""
+    if "requirements" in condor_settings:
+        requirements = condor_settings["requirements"]
+    if "memory_gpus" in condor_settings:
+        if requirements == "":
+            requirements = (
+                f"TARGET.CUDAGlobalMemoryMb > {condor_settings['memory_gpus']}"
+            )
+        else:
+            if ")" not in requirements:
+                requirements = f"({requirements})"
+            requirements = (
+                requirements
+                + f" && (TARGET.CUDAGlobalMemoryMb > {condor_settings['memory_gpus']})"
+            )
+    if requirements != "":
+        lines.append(f"requirements = {requirements}\n")
+
+    if "num_gpus" in condor_settings:
+        lines.append(f'request_gpus = {condor_settings["num_gpus"]}\n')
+        # TODO: Special settings of MPI-IS cluster => make optional
+        if condor_settings["num_gpus"] == 8:
+            # Request full node
+            lines.append("use template : FullNode\n")
+        elif condor_settings["num_gpus"] >= 6:
+            # Still request full nodes because wait times are long
+            lines.append(f'use template : FullNode({condor_settings["num_gpus"]})\n')
+
+    if "arguments" in condor_settings:
+        lines.append(f'arguments = "{condor_settings["arguments"]}"\n')
+
+    # TODO: Move responsibility to resume job from this file to htcondor job
+    # * add args in submission file:
+    # lines.append('on_exit_hold = (ExitCode =?= 3)\n')
+    # lines.append('on_exit_hold_reason = "Checkpointed, will resume"\n')
+    # lines.append('on_exit_hold_subcode = 1')
+    # lines.append('periodic_release = ((JobStatus =?= 5) & & (HoldReasonCode =?= 3) & & (HoldReasonSubCode =?= 1))\n')
+    # * modify condor submission script such that it doesn't need the --checkpoint arg to resume, but checks whether
+    #   some model_latest.pt is in train_dir to decide whether to start or continue a training run
+    # * terminate script with:
+    #   exit(3) # for checkpointed and to be continued run
+    #   exit(0) # for final run
+    #   exit(1) # for error
+    # info from MPI-IS IT team:
+    # https://atlas.is.localnet/confluence/display/IT/How+to+automatically+restart+jobs+according+to+the+exit+code
+
+    lines.append("\n")
+    lines.append(f'error = {join(train_dir, "info.err")}\n')
+    lines.append(f'output = {join(train_dir, "info.out")}\n')
+    lines.append(f'log = {join(train_dir, "info.log")}\n')
+    lines.append("queue")
+
+    with open(join(train_dir, filename), "w") as f:
+        for line in lines:
+            f.write(line)
+
+
+def copyfile(src, dst):
+    os.system("cp -p %s %s" % (src, dst))
+
+
+def copy_logfiles(log_dir, epoch, name="info", suffixes=(".err", ".log", ".out")):
+    for suffix in suffixes:
+        src = join(log_dir, name + suffix)
+        dest = join(log_dir, name + "_{:03d}".format(epoch) + suffix)
+        try:
+            copyfile(src, dest)
+        except:
+            print("Could not copy " + src)
+
+
+def train_condor():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--train_dir", required=True, help="Directory for Dingo training output."
+    )
+    parser.add_argument("--checkpoint", default="model_latest.pt")
+    parser.add_argument("--start_submission", action="store_true")
+    parser.add_argument(
+        "--exit_command",
+        type=str,
+        default="",
+        help="Optional command to execute after completion of training.",
+    )
+    parser.add_argument(
+        "--pretraining",
+        action="store_true",
+        help="Whether to pretrain embedding network.",
+    )
+    args = parser.parse_args()
+
+    # For condor settings, first try looking for a local settings file. Otherwise,
+    # defer to train_settings.yaml.
+    # if isfile(join(args.train_dir, 'local_settings.yaml')):
+    #     with open(join(args.train_dir, 'local_settings.yaml')) as f:
+    #         condor_settings = yaml.safe_load(f)['condor']
+    # else:
+
+    if not args.start_submission:
+
+        #
+        # TRAIN
+        #
+
+        # Document git
+        document_git_status(args.train_dir)
+        # Document setup
+        document_environment(args.train_dir)
+        # Cannot document GPU info here because this results in problems with mp.Process
+
+        if not isfile(join(args.train_dir, args.checkpoint)):
+            print("Beginning new training run.")
+            resume = False
+            with open(join(args.train_dir, "train_settings.yaml"), "r") as f:
+                train_settings = yaml.safe_load(f)
+
+            # Extract the local settings from train settings file, save it separately.
+            # This file can later be modified, and the settings take effect immediately
+            # upon resuming.
+
+            local_settings = train_settings.pop("local")
+            with open(os.path.join(args.train_dir, "local_settings.yaml"), "w") as f:
+                if (
+                    local_settings.get("wandb", False)
+                    and "id" not in local_settings["wandb"].keys()
+                ):
+                    try:
+                        import wandb
+
+                        local_settings["wandb"]["id"] = wandb.util.generate_id()
+                    except ImportError:
+                        print("wandb not installed, cannot generate run id.")
+                yaml.dump(local_settings, f, default_flow_style=False, sort_keys=False)
+
+        else:
+            print("Resuming training run.")
+            resume = True
+            train_settings = None
+            with open(os.path.join(args.train_dir, "local_settings.yaml"), "r") as f:
+                local_settings = yaml.safe_load(f)
+
+        # Setup multi-GPU training
+        if (
+            local_settings["device"] == "cuda"
+            and "condor" in local_settings
+            and "num_gpus" in local_settings["condor"]
+            and local_settings["condor"]["num_gpus"] > 1.0
+        ):
+            # Specify the number of processes (typically the number of GPUs available)
+            world_size = local_settings["condor"]["num_gpus"]
+
+            complete, resume, pm_epoch = run_multi_gpu_training(
+                world_size=world_size,
+                train_settings=train_settings,
+                local_settings=local_settings,
+                train_dir=args.train_dir,
+                ckpt_file=args.checkpoint,
+                resume=resume,
+                pretraining=args.pretraining,
+            )
+        else:
+            document_gpus(args.train_dir)
+            complete, resume, pm_epoch = run_training(
+                train_settings=train_settings,
+                local_settings=local_settings,
+                train_dir=args.train_dir,
+                ckpt_file=args.checkpoint,
+                resume=resume,
+                pretraining=args.pretraining,
+            )
+
+        print("Copying log files")
+        copy_logfiles(args.train_dir, epoch=pm_epoch)
+
+        #
+        # PREPARE NEXT SUBMISSION
+        #
+
+        if complete and not resume:
+            print(
+                f"Training complete, job will not be resubmitted. Executing exit command: {args.exit_command}."
+            )
+            if args.exit_command:
+                os.system(args.exit_command)
+            sys.exit()
+
+        elif resume:
+            condor_arguments = f"--train_dir {args.train_dir}"
+            ckpt_file = os.path.join(args.train_dir, "model_latest.pt")
+            condor_arguments += f" --checkpoint {ckpt_file}"
+
+    else:
+
+        #
+        # PREPARE FIRST SUBMISSION
+        #
+
+        condor_arguments = f"--train_dir {args.train_dir}"
+        if args.checkpoint != "model_latest.pt":
+            condor_arguments += f" --checkpoint {args.checkpoint}"
+
+    if args.exit_command:
+        condor_arguments += f" --exit_command '{args.exit_command}'"
+
+    submission_file = "submission_file.sub"
+    with open(join(args.train_dir, "train_settings.yaml"), "r") as f:
+        condor_settings = yaml.safe_load(f)["local"]["condor"]
+    condor_settings["arguments"] = condor_arguments
+    condor_settings["executable"] = join(
+        os.path.dirname(sys.executable), "dingo_train_condor"
+    )
+    create_submission_file(args.train_dir, condor_settings, submission_file)
+
+    #
+    # SUBMIT NEXT CONDOR JOB
+    #
+
+    if "bid" in condor_settings:
+        # This is a specific setting for the MPI-IS cluster.
+        bid = condor_settings["bid"]
+        os.system(
+            f"condor_submit_bid {bid} " f"{join(args.train_dir, submission_file)}"
+        )
+    else:
+        os.system(f"condor_submit {join(args.train_dir, submission_file)}")
+
+
+if __name__ == "__main__":
+    train_condor()

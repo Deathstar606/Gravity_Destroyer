@@ -1,0 +1,51 @@
+data:
+  inference_parameters: ["beta_residual", "chirp_mass"]
+  context_parameters:
+    [
+      "beta_proxy",
+      "mass_ratio",
+      "chi1z",
+      "chi2z",
+      "luminosity_distance",
+      "theta_jn",
+    ]
+
+model:
+  type: nsf+embedding
+  beyond_gr_checkpoint: "path/to/base/dingot1.pt"
+  posterior_kwargs:
+    beyond_gr: True
+    param_dim: 2
+    context_dim: 134
+    hidden_dim: 256 #🧧
+    num_transform_blocks: 2 #🧧
+    activation: "elu"
+    num_bins: 8
+    num_flow_steps: 10
+    base_transform_type: "rq-coupling"
+
+  embedding_kwargs:
+    beyond_gr: True
+
+training:
+  stage_0:
+    epochs: 100
+    batch_size: 256
+    # Freeze the entire transformer by passing 0 for n_layers_to_unfreeze
+    freeze_all_except_last_n_layers: 0
+    optimizer:
+      type: "adam"
+      lr: 0.0005
+    scheduler:
+      type: "cosine"
+
+  stage_1:
+    epochs: 100
+    batch_size: 256
+    # Unfreeze the last 2 attention blocks
+    freeze_all_except_last_n_layers: 2
+    optimizer:
+      type: "adam"
+      lr: 0.0001
+    scheduler:
+      type: "cosine"

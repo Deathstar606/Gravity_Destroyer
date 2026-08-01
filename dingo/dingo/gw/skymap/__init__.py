@@ -1,0 +1,1 @@
+from .dingo_skymap import generate_skymap_from_dingo_result

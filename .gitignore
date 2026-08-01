@@ -1,0 +1,4 @@
+# Ignore all HDF5 files anywhere in the project
+*.h5
+*.hdf5
+*.pt

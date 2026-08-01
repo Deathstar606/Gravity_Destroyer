@@ -1,0 +1,8 @@
+device: xpu
+num_workers: 4
+runtime_limits:
+  max_time_per_run: 1000000
+  max_epochs_per_run: 50
+checkpoint_epochs: 10
+copy_waveform_dataset_to_tmp: false
+local_cache_path: /tmp

@@ -212,3 +212,4 @@ __marimo__/
 # Do not upload the models to git
 *dingo_baseline.pt
 *dingo_t1.pt
+*.pt

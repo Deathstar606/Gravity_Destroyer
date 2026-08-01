@@ -58,13 +58,17 @@ def create_parser(top_level=True, usage=None):
         allow_abbrev=False,
         formatter_class=configargparse.ArgumentDefaultsRawHelpFormatter,
     )
+    parser.exclusive_keys = {
+        "Injection arguments": ["--injection-file", "--injection-dict"],
+        "Prior arguments": ["--prior-file", "--prior-dict"],
+    }
     parser.add("ini", type=str, is_config_file=True, help="Configuration ini file")
     parser.add("-v", "--verbose", action="store_true", help="Verbose output")
-    # parser.add(
-    #     "--version",
-    #     action="version",
-    #     version=f"%(prog)s={get_version_information()}\nbilby={bilby.__version__}",
-    # )
+    parser.add(
+        "--version",
+        action="version",
+        version=f"%(prog)s={get_version_information()}\nbilby={get_version_information()}",
+    )
 
     calibration_parser = parser.add_argument_group(
         "Calibration arguments",
@@ -113,32 +117,45 @@ def create_parser(top_level=True, usage=None):
             "uncertainty"
         ),
     )
-    #
-    # calibration_parser.add(
-    #     "--spline-calibration-amplitude-uncertainty-dict",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "Dictionary of the amplitude uncertainties for the constant "
-    #         "uncertainty model"
-    #     ),
-    # )
-    #
-    # calibration_parser.add(
-    #     "--spline-calibration-phase-uncertainty-dict",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "Dictionary of the phase uncertainties for the constant "
-    #         "uncertainty model"
-    #     ),
-    # )
-    # calibration_parser.add(
-    #     "--calibration-prior-boundary",
-    #     type=nonestr,
-    #     default="reflective",
-    #     help="Boundary methods for the calibration prior boundary",
-    # )
+    calibration_parser.add(
+        "--spline-calibration-amplitude-uncertainty-dict",
+        type=nonestr,
+        default=None,
+        help=(
+            "Dictionary of the amplitude uncertainties for the constant "
+            "uncertainty model"
+        ),
+    )
+    calibration_parser.add(
+        "--spline-calibration-phase-uncertainty-dict",
+        type=nonestr,
+        default=None,
+        help=(
+            "Dictionary of the phase uncertainties for the constant "
+            "uncertainty model"
+        ),
+    )
+    calibration_parser.add(
+        "--calibration-prior-boundary",
+        type=nonestr,
+        default="reflective",
+        help="Boundary methods for the calibration prior boundary",
+    )
+
+    global_settings_parser = parser.add_argument_group(
+        title="Global settings",
+        description="Settings for global configuration",
+    )
+    global_settings_parser.add(
+        "--cosmology",
+        default="Planck15",
+        type=str,
+        help=(
+            "The name of the cosmology to use. Defaults to Planck15, see "
+            ":external:py:func:`bilby.gw.cosmology.get_available_cosmologies` "
+            "for a list of the available cosmologies."
+        ),
+    )
 
     if top_level is False:
         parser.add("--idx", type=int, help="The level A job index", default=0)
@@ -292,6 +309,16 @@ def create_parser(top_level=True, usage=None):
         ),
     )
     data_gen_pars.add(
+        "--fetch-open-data-kwargs",
+        type=nonestr,
+        default=None,
+        help=(
+            "Dictionary of additional kwargs to pass to `fetch_open_data`. "
+            "By default, bilby_pipe requests `sample_rate=16384`. This can be "
+            "overwritten by passing `sample_rate=4096` to this argument."
+        ),
+    )
+    data_gen_pars.add(
         "--frame-type-dict",
         type=nonestr,
         default=None,
@@ -360,6 +387,15 @@ def create_parser(top_level=True, usage=None):
         # default=4,
         default=None,
         help="The duration of data around the event to use",
+    )
+    det_parser.add(
+        "--coherence-test",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the analysis for all detectors together and for each "
+            "detector separately"
+        ),
     )
     det_parser.add(
         "--generation-seed",
@@ -677,6 +713,16 @@ def create_parser(top_level=True, usage=None):
         ),
     )
     submission_parser.add(
+        "--periodic-restart-time",
+        default=28800,
+        type=int,
+        help=(
+            "Time after which the job will self-evict when scheduler=condor. "
+            "After this, condor will restart the job. Default is 28800. "
+            "This is used to decrease the chance of HTCondor hard evictions"
+        ),
+    )
+    submission_parser.add(
         "--conda-env",
         type=nonestr,
         default=None,
@@ -836,6 +882,15 @@ def create_parser(top_level=True, usage=None):
         ),
     )
     submission_parser.add(
+        "--desired-sites",
+        type=nonestr,
+        help=(
+            "A comma-separated list of desired sites, wrapped in quoates."
+            " e.g., desired-sites='site1,site2'. This can be used on the OSG"
+            " to specify specific run nodes."
+        ),
+    )
+    submission_parser.add(
         "--cpu-desired-sites",
         type=nonestr,
         help=(
@@ -938,80 +993,153 @@ def create_parser(top_level=True, usage=None):
         type=str,
         help="Time parameter to sample in, either 'geocent' (default) or, e.g., 'H1'",
     )
-    # likelihood_parser.add(
-    #     "--likelihood-type",
-    #     default="GravitationalWaveTransient",
-    #     help=(
-    #         "The likelihood. Can be one of [GravitationalWaveTransient, "
-    #         "ROQGravitationalWaveTransient, zero] or python path to a bilby "
-    #         "likelihood class available in the users installation. "
-    #         "The --roq-folder or both --linear-matrix and --quadratic-matrix "
-    #         "are required if the ROQ likelihood used. If both the options are "
-    #         "specified, ROQ data are taken from roq-folder, and linear-matrix "
-    #         "and quadratic-matrix are ignored."
-    #         "If `zero` is given, a testing ZeroLikelihood is used which always"
-    #         "return zero."
-    #     ),
-    # )
-    # likelihood_parser.add(
-    #     "--roq-folder", type=nonestr, default=None, help="The data for ROQ"
-    # )
-    # likelihood_parser.add(
-    #     "--roq-linear-matrix",
-    #     type=nonestr,
-    #     default=None,
-    #     help="Path to ROQ basis for linear inner products. This option is ignored if roq-folder is not None.",
-    # )
-    # likelihood_parser.add(
-    #     "--roq-quadratic-matrix",
-    #     type=nonestr,
-    #     default=None,
-    #     help="Path to ROQ basis for quadratic inner products. This option is ignored if roq-folder is not None.",
-    # )
-    # likelihood_parser.add(
-    #     "--roq-weights",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "If given, the ROQ weights to use (rather than building them). "
-    #         "This must be given along with the roq-folder for checking"
-    #     ),
-    # )
-    # likelihood_parser.add(
-    #     "--roq-weight-format",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "File format of roq weights. This should be npz, hdf5, or json. "
-    #         "If not specified, it is set to npz if basis file is specified "
-    #         "through roq-folder, and hdf5 if through roq-linear-matrix and "
-    #         "roq-quadratic-matrix"
-    #     ),
-    # )
-    # likelihood_parser.add(
-    #     "--roq-scale-factor",
-    #     default=1,
-    #     type=float,
-    #     help="Rescaling factor for the ROQ, default is 1 (no rescaling)",
-    # )
-    # likelihood_parser.add(
-    #     "--extra-likelihood-kwargs",
-    #     type=nonestr,
-    #     default=None,
-    #     help="Additional keyword arguments to pass to the likelihood. Any arguments "
-    #     "which are named bilby_pipe arguments, e.g., distance_marginalization "
-    #     "should NOT be included. This is only used if you are not using the "
-    #     "GravitationalWaveTransient or ROQGravitationalWaveTransient likelihoods",
-    # )
+    likelihood_parser.add(
+        "--calibration-marginalization",
+        action="store_true",
+        default=False,
+        help=(
+            "Boolean. If true, use a likelihood that is numerically marginalized "
+            "over the calibration uncertainty as described in arXiv:2009.10193."
+        ),
+    )
+    likelihood_parser.add(
+        "--distance-marginalization",
+        action="store_true",
+        default=False,
+        help="Boolean. If true, use a distance-marginalized likelihood",
+    )
+    likelihood_parser.add(
+        "--distance-marginalization-lookup-table",
+        default=None,
+        type=nonestr,
+        help="Path to the distance-marginalization lookup table",
+    )
+    likelihood_parser.add(
+        "--phase-marginalization",
+        action="store_true",
+        default=False,
+        help="Boolean. If true, use a phase-marginalized likelihood",
+    )
+    likelihood_parser.add(
+        "--time-marginalization",
+        action="store_true",
+        default=False,
+        help="Boolean. If true, use a time-marginalized likelihood",
+    )
+    likelihood_parser.add(
+        "--jitter-time",
+        action=StoreBoolean,
+        default=True,
+        help="Boolean. If true, and using a time-marginalized likelihood 'time jittering' will be performed",
+    )
+    likelihood_parser.add(
+        "--reference-frame",
+        default="sky",
+        type=str,
+        help="Reference frame for the sky parameterisation, either 'sky' (default) or, e.g., 'H1L1'",
+    )
+    likelihood_parser.add(
+        "--likelihood-type",
+        default="GravitationalWaveTransient",
+        help=(
+            "The likelihood. Can be one of [GravitationalWaveTransient, "
+            "ROQGravitationalWaveTransient, zero] or python path to a bilby "
+            "likelihood class available in the users installation. "
+            "The --roq-folder or both --linear-matrix and --quadratic-matrix "
+            "are required if the ROQ likelihood used. If both the options are "
+            "specified, ROQ data are taken from roq-folder, and linear-matrix "
+            "and quadratic-matrix are ignored."
+            "If `zero` is given, a testing ZeroLikelihood is used which always"
+            "return zero."
+        ),
+    )
+    likelihood_parser.add(
+        "--calibration-lookup-table",
+        type=nonestr,
+        help=(
+            "Dictionary of calibration lookup files for use with calibration "
+            "marginalization/the precomputed model. If these files don't "
+            "exist, they will be generated from the passed uncertainties."
+        ),
+    )
+    likelihood_parser.add(
+        "--number-of-response-curves",
+        type=int,
+        default=1000,
+        help="The number of response curves to use for calibration marginalization",
+    )
+    likelihood_parser.add(
+        "--roq-folder", type=nonestr, default=None, help="The data for ROQ"
+    )
+    likelihood_parser.add(
+        "--roq-linear-matrix",
+        type=nonestr,
+        default=None,
+        help="Path to ROQ basis for linear inner products. This option is ignored if roq-folder is not None.",
+    )
+    likelihood_parser.add(
+        "--roq-quadratic-matrix",
+        type=nonestr,
+        default=None,
+        help="Path to ROQ basis for quadratic inner products. This option is ignored if roq-folder is not None.",
+    )
+    likelihood_parser.add(
+        "--roq-weights",
+        type=nonestr,
+        default=None,
+        help=(
+            "If given, the ROQ weights to use (rather than building them). "
+            "This must be given along with the roq-folder for checking"
+        ),
+    )
+    likelihood_parser.add(
+        "--roq-weight-format",
+        type=str,
+        default="hdf5",
+        help=(
+            "File format of roq weights. This should be npz, hdf5, or json. "
+            "If not specified, it is set to hdf5."
+        ),
+    )
+    likelihood_parser.add(
+        "--roq-scale-factor",
+        default=1,
+        type=float,
+        help="Rescaling factor for the ROQ, default is 1 (no rescaling)",
+    )
+    likelihood_parser.add(
+        "--fiducial-parameters",
+        default=None,
+        type=nonestr,
+        help="The reference parameters for the relative binning likelihod. If this is not specified, the value will be drawn from the prior.",
+    )
+    likelihood_parser.add(
+        "--update-fiducial-parameters",
+        action=StoreBoolean,
+        default=False,
+        help="Whether to update the fiducial parameters using an optimization algorithm. This is automatically set to True if --fiducial-parameters is None.",
+    )
+    likelihood_parser.add(
+        "--epsilon",
+        default=0.025,
+        type=float,
+        help="Epsilon value for the relative binning likelihood",
+    )
+    likelihood_parser.add(
+        "--extra-likelihood-kwargs",
+        type=nonestr,
+        default=None,
+        help="Additional keyword arguments to pass to the likelihood. Any arguments which are named bilby_pipe arguments, e.g., distance_marginalization should NOT be included. This is only used if you are not using the GravitationalWaveTransient or ROQGravitationalWaveTransient likelihoods",
+    )
 
     output_parser = parser.add_argument_group(
         title="Output arguments", description="What kind of output/summary to generate."
     )
-    # output_parser.add_argument(
-    #     "--plot-trace",
-    #     action="store_true",
-    #     help="Create traceplots during the run",
-    # )
+    output_parser.add_argument(
+        "--plot-trace",
+        action="store_true",
+        help="Create traceplots during the run",
+    )
     output_parser.add_argument(
         "--plot-data",
         action="store_true",
@@ -1027,11 +1155,11 @@ def create_parser(top_level=True, usage=None):
         action="store_true",
         help="Create spectrogram plot",
     )
-    # output_parser.add_argument(
-    #     "--plot-calibration",
-    #     action="store_true",
-    #     help="Create calibration posterior plot",
-    # )
+    output_parser.add_argument(
+        "--plot-calibration",
+        action="store_true",
+        help="Create calibration posterior plot",
+    )
     output_parser.add_argument(
         "--plot-corner",
         action="store_true",
@@ -1052,23 +1180,23 @@ def create_parser(top_level=True, usage=None):
         action="store_true",
         help="Create PP plot based on several injections.",
     )
-    # output_parser.add_argument(
-    #     "--plot-marginal",
-    #     action="store_true",
-    #     help="Create 1-d marginal posterior plots",
-    # )
-    # output_parser.add_argument(
-    #     "--plot-skymap", action="store_true", help="Create posterior skymap"
-    # )
-    # output_parser.add_argument(
-    #     "--plot-waveform", action="store_true", help="Create waveform posterior plot"
-    # )
-    # output_parser.add_argument(
-    #     "--plot-format",
-    #     default="png",
-    #     help="Format for making bilby_pipe plots, can be [png, pdf, html]. "
-    #     "If specified format is not supported, will default to png.",
-    # )
+    output_parser.add_argument(
+        "--plot-marginal",
+        action="store_true",
+        help="Create 1-d marginal posterior plots",
+    )
+    output_parser.add_argument(
+        "--plot-skymap", action="store_true", help="Create posterior skymap"
+    )
+    output_parser.add_argument(
+        "--plot-waveform", action="store_true", help="Create waveform posterior plot"
+    )
+    output_parser.add_argument(
+        "--plot-format",
+        default="png",
+        help="Format for making bilby_pipe plots, can be [png, pdf, html]. "
+        "If specified format is not supported, will default to png.",
+    )
     #
     output_parser.add(
         "--create-summary", action="store_true", help="Create a PESummary page"
@@ -1216,82 +1344,85 @@ def create_parser(top_level=True, usage=None):
         ),
     )
 
-    # postprocessing_parser = parser.add_argument_group(
-    #     title="Post processing arguments",
-    #     description="What post-processing to perform.",
-    # )
-    # postprocessing_parser.add(
-    #     "--postprocessing-executable",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "An executable name for postprocessing. A single postprocessing "
-    #         " job is run as a child of all analysis jobs"
-    #     ),
-    # )
-    # postprocessing_parser.add(
-    #     "--postprocessing-arguments",
-    #     type=nonestr,
-    #     default=None,
-    #     help="Arguments to pass to the postprocessing executable",
-    # )
-    # postprocessing_parser.add(
-    #     "--single-postprocessing-executable",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "An executable name for postprocessing. A single postprocessing "
-    #         "job is run as a child for each analysis jobs: note the "
-    #         "difference with respect postprocessing-executable"
-    #     ),
-    # )
-    # postprocessing_parser.add(
-    #     "--single-postprocessing-arguments",
-    #     type=nonestr,
-    #     default=None,
-    #     help=(
-    #         "Arguments to pass to the single postprocessing executable. The "
-    #         "str '$RESULT' will be replaced by the path to the individual "
-    #         "result file"
-    #     ),
-    # )
+    postprocessing_parser = parser.add_argument_group(
+        title="Post processing arguments",
+        description="What post-processing to perform.",
+    )
+    postprocessing_parser.add(
+        "--postprocessing-executable",
+        type=nonestr,
+        default=None,
+        help=(
+            "An executable name for postprocessing. A single postprocessing "
+            " job is run as a child of all analysis jobs"
+        ),
+    )
+    postprocessing_parser.add(
+        "--postprocessing-arguments",
+        type=nonestr,
+        default=None,
+        help="Arguments to pass to the postprocessing executable",
+    )
+    postprocessing_parser.add(
+        "--single-postprocessing-executable",
+        type=nonestr,
+        default=None,
+        help=(
+            "An executable name for postprocessing. A single postprocessing "
+            "job is run as a child for each analysis jobs: note the "
+            "difference with respect postprocessing-executable"
+        ),
+    )
+    postprocessing_parser.add(
+        "--single-postprocessing-arguments",
+        type=nonestr,
+        default=None,
+        help=(
+            "Arguments to pass to the single postprocessing executable. The "
+            "str '$RESULT' will be replaced by the path to the individual "
+            "result file"
+        ),
+    )
 
-    # sampler_parser = parser.add_argument_group(title="Sampler arguments")
-    # sampler_parser.add("--sampler", type=str, default="dynesty", help="Sampler to use")
-    # sampler_parser.add(
-    #     "--sampling-seed", default=None, type=noneint, help="Random sampling seed"
-    # )
+    sampler_parser = parser.add_argument_group(title="Sampler arguments")
+    sampler_parser.add("--sampler", type=str, default="dynesty", help="Sampler to use")
+    sampler_parser.add(
+        "--sampling-seed", default=None, type=noneint, help="Random sampling seed"
+    )
 
-    # sampler_parser.add(
-    #     "--sampler-kwargs",
-    #     type=str,
-    #     default="DynestyDefault",
-    #     help=(
-    #         "Dictionary of sampler-kwargs to pass in, e.g., {nlive: 1000} OR "
-    #         "pass pre-defined set of sampler-kwargs {DynestyDefault, BilbyMCMCDefault, FastTest}"
-    #     ),
-    # )
+    sampler_parser.add(
+        "--sampler-kwargs",
+        type=str,
+        default="DynestyDefault",
+        help=(
+            "Dictionary of sampler-kwargs to pass in, e.g., {nlive: 1000} OR "
+            "pass pre-defined set of sampler-kwargs {DynestyDefault, BilbyMCMCDefault, FastTest}"
+        ),
+    )
 
     # Waveform arguments
     waveform_parser = parser.add_argument_group(
         title="Waveform arguments", description="Setting for the waveform generator"
     )
-    # waveform_parser.add(
-    #     "--waveform-generator",
-    #     default="bilby.gw.waveform_generator.LALCBCWaveformGenerator",
-    #     type=str,
-    #     help="The waveform generator class, should be a python path. This will "
-    #     "not be able to use any arguments not passed to the default.",
-    # )
-    # waveform_parser.add(
-    #     "--waveform-generator-constructor-dict",
-    #     default=None,
-    #     type=nonestr,
-    #     help=(
-    #         "A dictionary of arbitrary arguments to pass"
-    #         " to the bilby waveform generator class constructor."
-    #     ),
-    # )
+    waveform_parser.add(
+        "--waveform-generator",
+        default="bilby.gw.waveform_generator.LALCBCWaveformGenerator",
+        type=str,
+        help=(
+            "The waveform generator class, should be a python path. "
+            "Construction arguments can be passed via the dictionary "
+            "'--waveform-generator-constructor-dict'."
+        ),
+    )
+    waveform_parser.add(
+        "--waveform-generator-constructor-dict",
+        default=None,
+        type=nonestr,
+        help=(
+            "A dictionary of arbitrary arguments to pass to the bilby waveform "
+            "generator class constructor."
+        ),
+    )
     waveform_parser.add(
         "--reference-frequency",
         default=None,
@@ -1310,31 +1441,30 @@ def create_parser(top_level=True, usage=None):
         action=StoreBoolean,
         help="Turns on waveform error catching",
     )
-    # waveform_parser.add(
-    #     "--pn-spin-order",
-    #     default=-1,
-    #     type=int,
-    #     help="Post-newtonian order to use for the spin",
-    # )
-    # waveform_parser.add(
-    #     "--pn-tidal-order",
-    #     default=-1,
-    #     type=int,
-    #     help="Post-Newtonian order to use for tides",
-    # )
-    # waveform_parser.add(
-    #     "--pn-phase-order",
-    #     default=-1,
-    #     type=int,
-    #     help="post-Newtonian order to use for the phase",
-    # )
-    # waveform_parser.add(
-    #     "--pn-amplitude-order",
-    #     default=0,
-    #     type=int,
-    #     help="Post-Newtonian order to use for the amplitude. Also "
-    #     "used to determine the waveform starting frequency.",
-    # )
+    waveform_parser.add(
+        "--pn-spin-order",
+        default=-1,
+        type=int,
+        help="Post-newtonian order to use for the spin",
+    )
+    waveform_parser.add(
+        "--pn-tidal-order",
+        default=-1,
+        type=int,
+        help="Post-Newtonian order to use for tides",
+    )
+    waveform_parser.add(
+        "--pn-phase-order",
+        default=-1,
+        type=int,
+        help="post-Newtonian order to use for the phase",
+    )
+    waveform_parser.add(
+        "--pn-amplitude-order",
+        default=0,
+        type=int,
+        help="Post-Newtonian order to use for the amplitude. Also used to determine the waveform starting frequency.",
+    )
     waveform_parser.add(
         "--numerical-relativity-file",
         default=None,
@@ -1344,66 +1474,65 @@ def create_parser(top_level=True, usage=None):
             "https://git.ligo.org/waveforms/lvcnr-lfs for examples"
         ),
     )
-    # waveform_parser.add(
-    # "--waveform-arguments-dict",
-    # default=None,
-    # type=nonestr,
-    # help=(
-    # "A dictionary of arbitrary additional waveform-arguments to pass"
-    # "  to the bilby waveform generator's `waveform_arguments`. Only used "
-    # "for injections"
-    # ),
-    # )
-    # waveform_parser.add(
-    #     "--mode-array",
-    #     default=None,
-    #     type=nonestr,
-    #     action="append",
-    #     help="Array of modes to use for the waveform. Should be "
-    #     "a list of lists, eg. [[2,2], [2,-2]]",
-    # )
-    # waveform_parser.add(
-    #     "--frequency-domain-source-model",
-    #     default="lal_binary_black_hole",
-    #     type=str,
-    #     help=(
-    #         "Name of the frequency domain source model. Can be one of"
-    #         "[lal_binary_black_hole, lal_binary_neutron_star,"
-    #         "lal_eccentric_binary_black_hole_no_spins, sinegaussian, "
-    #         "supernova, supernova_pca_model] or any python  path to a bilby "
-    #         " source function the users installation, e.g. examp.source.bbh"
-    #     ),
-    # )
-    # waveform_parser.add(
-    #     "--conversion-function",
-    #     default=None,
-    #     type=nonestr,
-    #     help=(
-    #         "Optional python path to a user-specified conversion function "
-    #         "If unspecified, this is determined by the frequency_domain_source_model."
-    #         "If the source-model contains binary_black_hole, "
-    #         "the conversion function is bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters. "
-    #         "If the source-model contains binary_neutron_star, "
-    #         "the generation function is bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters. "
-    #         "If you specify your own function, you may wish to use the I/O of those functions as templates."
-    #         "If given as 'noconvert' (case insensitive), no conversion is used'"
-    #     ),
-    # )
-    # waveform_parser.add(
-    #     "--generation-function",
-    #     default=None,
-    #     type=nonestr,
-    #     help=(
-    #         "Optional python path to a user-specified generation function "
-    #         "If unspecified, this is determined by the frequency_domain_source_model."
-    #         "If the source-model contains binary_black_hole, "
-    #         "the generation function is bilby.gw.conversion.generate_all_bbh_parameters. "
-    #         "If the source-model contains binary_neutron_star, "
-    #         "the generation function is bilby.gw.conversion.generate_all_bns_parameters. "
-    #         "If you specify your own function, you may wish to use the I/O of those functions as templates"
-    #         "If given as 'noconvert' (case insensitive), no generation is used'"
-    #     ),
-    # )
+    waveform_parser.add(
+        "--waveform-arguments-dict",
+        default=None,
+        type=nonestr,
+        help=(
+            "A dictionary of arbitrary additional waveform-arguments to pass"
+            " to the bilby waveform generator's `waveform_arguments`. Only used "
+            "for injections"
+        ),
+    )
+    waveform_parser.add(
+        "--mode-array",
+        default=None,
+        type=nonestr,
+        action="append",
+        help="Array of modes to use for the waveform. Should be a list of lists, eg. [[2,2], [2,-2]]",
+    )
+    waveform_parser.add(
+        "--frequency-domain-source-model",
+        default="lal_binary_black_hole",
+        type=str,
+        help=(
+            "Name of the frequency domain source model. Can be one of"
+            "[lal_binary_black_hole, lal_binary_neutron_star,"
+            "lal_eccentric_binary_black_hole_no_spins, sinegaussian, "
+            "supernova, supernova_pca_model] or any python path to a bilby "
+            "source function in the user's installation, e.g. examp.source.bbh"
+        ),
+    )
+    waveform_parser.add(
+        "--conversion-function",
+        default=None,
+        type=nonestr,
+        help=(
+            "Optional python path to a user-specified conversion function. "
+            "If unspecified, this is determined by the frequency_domain_source_model."
+            "If the source-model contains binary_black_hole, the conversion "
+            "function is bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters. "
+            "If the source-model contains binary_neutron_star, the generation "
+            "function is bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters. "
+            "If you specify your own function, you may wish to use the I/O of those functions as templates."
+            "If given as 'noconvert' (case insensitive), no conversion is used"
+        ),
+    )
+    waveform_parser.add(
+        "--generation-function",
+        default=None,
+        type=nonestr,
+        help=(
+            "Optional python path to a user-specified generation function. "
+            "If unspecified, this is determined by the frequency_domain_source_model."
+            "If the source-model contains binary_black_hole, the generation "
+            "function is bilby.gw.conversion.generate_all_bbh_parameters. "
+            "If the source-model contains binary_neutron_star, the generation "
+            "function is bilby.gw.conversion.generate_all_bns_parameters. "
+            "If you specify your own function, you may wish to use the I/O of those functions as templates."
+            "If given as 'noconvert' (case insensitive), no generation is used"
+        ),
+    )
 
     # # Constants arguments
     # global_settings_parser = parser.add_argument_group(
@@ -1540,6 +1669,23 @@ def create_parser(top_level=True, usage=None):
             "total number of processes is n-parallel * "
             "request-cpus-importance-sampling."
         ),
+    )
+
+    reweighting_parser = parser.add_argument_group(
+        title="Reweighting arguments",
+        description="Options for reweighting nested samples.",
+    )
+    reweighting_parser.add(
+        "--reweight-nested-samples",
+        action=StoreBoolean,
+        default=True,
+        help="Whether to reweight nested samples directly. Currently this only works with dynesty.",
+    )
+    reweighting_parser.add(
+        "--reweighting-configuration",
+        type=nonestr,
+        default=None,
+        help="Configuration for reweighting the result. This can be specified as either a dictionary in the configuration file, or a json file.",
     )
 
     return parser

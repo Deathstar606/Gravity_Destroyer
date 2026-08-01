@@ -37,6 +37,78 @@ class DataGenerationInput(BilbyDataGenerationInput):
         self.model_init = args.model_init
 
         Input.__init__(self, args, unknown_args)
+
+        """ print("\n========== AVAILABLE ARGUMENTS ==========")
+        for k in sorted(vars(args).keys()):
+            print(k)
+        print("=========================================\n")
+
+        required_args = [
+            "model",
+            "model_init",
+            "ini",
+            "transfer_files",
+            "cosmology",
+            "idx",
+            "generation_seed",
+            "trigger_time",
+            "outdir",
+            "label",
+            "prior_dict",
+            "prior_dict_updates",
+            "ignore_gwpy_data_quality_check",
+            "detectors",
+            "channel_dict",
+            "fetch_open_data_kwargs",
+            "data_dict",
+            "data_format",
+            "allow_tape",
+            "tukey_roll_off",
+            "gaussian_noise",
+            "zero_noise",
+            "resampling_method",
+            "timeslide_dict",
+            "timeslide_file",
+            "gps_file",
+            "duration",
+            "post_trigger_duration",
+            "sampling_frequency",
+            "minimum_frequency",
+            "maximum_frequency",
+            "suppress",
+            "reference_frequency",
+            "waveform_approximant",
+            "catch_waveform_errors",
+            "injection_waveform_arguments",
+            "numerical_relativity_file",
+            "dingo_injection",
+            "injection_waveform_approximant",
+            "save_bilby_data_dump",
+            "time_reference",
+            "deltaT",
+            "enforce_signal_duration",
+            "psd_maximum_duration",
+            "psd_dict",
+            "psd_length",
+            "psd_fractional_overlap",
+            "psd_start_time",
+            "psd_method",
+            "plot_data",
+            "plot_spectrogram",
+            "plot_injection",
+            "injection",
+            "injection_file",
+            "injection_dict",
+            "importance_sampling_generation",
+            "importance_sampling_updates",
+            "reference_frame",
+            "waveform_generator",
+            "waveform_generator_constructor_dict",
+            "pn_spin_order",
+            "pn_phase_order",
+        ]
+        check_required_args(args, required_args) """
+
         # Generic initialisation
         self.meta_data = dict(
             command_line_args=args.__dict__,
@@ -52,7 +124,7 @@ class DataGenerationInput(BilbyDataGenerationInput):
         self.transfer_files = args.transfer_files
 
         # Global settings
-        # self.cosmology = args.cosmology
+        self.cosmology = args.cosmology
 
         # Run index arguments
         self.idx = args.idx
@@ -92,6 +164,10 @@ class DataGenerationInput(BilbyDataGenerationInput):
         self.ignore_gwpy_data_quality_check = args.ignore_gwpy_data_quality_check
         self.detectors = args.detectors
         self.channel_dict = args.channel_dict
+        if hasattr(args, "fetch_open_data_kwargs"):
+            self.fetch_open_data_kwargs = args.fetch_open_data_kwargs
+        else:
+            self.fetch_open_data_kwargs = {}
         self.data_dict = args.data_dict
         self.data_format = args.data_format
         self.allow_tape = args.allow_tape

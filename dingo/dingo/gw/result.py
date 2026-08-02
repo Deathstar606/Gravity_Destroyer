@@ -459,6 +459,16 @@ class Result(CoreResult):
         param_keys = [k for k, v in self.prior.items() if not isinstance(v, Constraint)]
         theta = self.samples[param_keys]
         log_prior = self.prior.ln_prob(theta, axis=0)
+        print(type(self.samples), "🔥")
+        print(self.samples.shape)
+
+        print(theta.columns.tolist())
+
+        print(theta.head())
+
+        print(self.prior.keys())
+
+        print(param_keys, "🔥")
         constraints = self.prior.evaluate_constraints(theta)
         np.putmask(log_prior, constraints == 0, -np.inf)
         within_prior = log_prior != -np.inf

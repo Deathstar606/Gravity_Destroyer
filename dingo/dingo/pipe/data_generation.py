@@ -175,6 +175,7 @@ class DataGenerationInput(BilbyDataGenerationInput):
         self.gaussian_noise = args.gaussian_noise
         self.zero_noise = args.zero_noise
         self.resampling_method = args.resampling_method
+        self.reuse_event_data = getattr(args, 'reuse_event_data', False)
 
         if args.timeslide_dict is not None:
             self.timeslide_dict = convert_string_to_dict(args.timeslide_dict)
@@ -332,6 +333,14 @@ class DataGenerationInput(BilbyDataGenerationInput):
             self._inject_dingo_signal(args)
 
     def create_data(self, args):
+        if self.reuse_event_data and os.path.isfile(self.event_data_file):
+            logger.info(
+                f"Reuse event data enabled and cached event data file found: "
+                f"{self.event_data_file}. Skipping GWOSC download."
+            )
+            self.event_dataset = EventDataset(file_name=self.event_data_file)
+            return
+
         # Try downloading data multiple times to prevent failure from network/server time out
         retries = 5
         for attempt in range(retries):
@@ -484,6 +493,17 @@ class DataGenerationInput(BilbyDataGenerationInput):
         This method will also save the PSDs as .txt files in the data directory
         for easy reading by pesummary and Bilby.
         """
+
+        # If reuse_event_data is requested and the expected event file already exists,
+        # skip attempting to re-create / download data. This prevents errors where
+        # create_data() returned early without setting up bilby interferometers.
+        if getattr(self, 'reuse_event_data', False) and os.path.isfile(self.event_data_file):
+            logger.info(
+                f"Reuse event data enabled and event data file already exists at {self.event_data_file}. "
+                "Skipping save_hdf5 and avoiding re-download."
+            )
+            # Nothing to do: cached file is already present for downstream stages.
+            return
 
         try:
             model = build_model_from_kwargs(

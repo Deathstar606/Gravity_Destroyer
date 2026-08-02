@@ -204,6 +204,17 @@ def create_parser(top_level=True, usage=None):
     )
 
     data_gen_pars.add(
+        "--reuse-event-data",
+        "--skip-generation",
+        action=StoreBoolean,
+        default=False,
+        help=(
+            "If enabled and a cached event data file exists, reuse the cached "
+            "event data and skip downloading from GWOSC."
+        ),
+    )
+
+    data_gen_pars.add(
         "--shift-segment-for-psd-generation-if-nan",
         action=StoreBoolean,
         default=False,

@@ -13,6 +13,19 @@ class BeyondGRFlowWrapper(FlowWrapper):
 
     def _get_context(self, *x):
 
+        print("========== _get_context ==========")
+        print("len(x) =", len(x))
+
+        for i, obj in enumerate(x):
+            print(f"\nArgument {i}")
+            print("type:", type(obj))
+
+            if hasattr(obj, "shape"):
+                print("shape:", obj.shape)
+
+            if isinstance(obj, dict):
+                print(obj.keys())
+
         logging_info = {}
 
         waveform = x[0]

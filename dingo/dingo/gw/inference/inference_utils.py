@@ -2,7 +2,7 @@ from typing import Optional
 
 import numpy as np
 
-from dingo.gw.inference.gw_samplers import GWSampler
+from dingo.gw.inference.gw_samplers import create_sampler
 
 
 def prepare_log_prob(
@@ -63,6 +63,6 @@ def prepare_log_prob(
 
     # Prepare sampler with unconditional model as initialization. This should only use
     # one iteration and also not remove any outliers.
-    sampler.init_sampler = GWSampler(model=unconditional_model)
+    sampler.init_sampler = create_sampler(model=unconditional_model)
     sampler.num_iterations = 1
     sampler.remove_init_outliers = 0.0  # Turn off for final sampler.

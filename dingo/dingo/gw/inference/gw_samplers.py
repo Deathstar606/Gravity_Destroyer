@@ -40,6 +40,34 @@ from dingo.gw.transforms import (
     OnlineBeyondGRRotation,
     ComputeBeyondGRParameters
 )
+
+def _is_beyond_gr_model(model) -> bool:
+    network = getattr(model, "network", None)
+    if network is not None:
+        network_cls = type(network)
+        class_name = getattr(network_cls, "__name__", "")
+        module_name = getattr(network_cls, "__module__", "")
+        module_parts = module_name.split(".")
+        if "BeyondGR" in class_name or "beyond_gr" in module_parts:
+            return True
+
+    metadata = getattr(model, "metadata", {}) or {}
+    data_settings = metadata.get("train_settings", {}).get("data", {})
+    context_parameters = data_settings.get("context_parameters", [])
+    if not context_parameters:
+        return False
+    return any(
+        param in {"beta_proxy", "beta_residual", "chi1z", "chi2z"}
+        for param in context_parameters
+    )
+
+def create_sampler(model):
+    print("Creating sampler...")
+    if _is_beyond_gr_model(model):
+        print("Using BeyondGRSampler")
+        return BeyondGRSampler(model)
+    print("Using GWSampler")
+    return GWSampler(model)
         
 class SamplerProtocol(Protocol):
     base_model_metadata: dict
@@ -63,19 +91,19 @@ class GWSamplerMixin(object):
         * correction for fixed detector locations during training (t_ref)
     """
 
-    def __init__(self: SamplerProtocol, **kwargs):
+    def __init__(self: SamplerProtocol, *args, **kwargs):
         """
         Parameters
         ----------
-        kwargs
-            Keyword arguments that are forwarded to the superclass.
+        args, kwargs
+            Arguments that are forwarded to the superclass.
         """
         # Has to be specified before init, because the information is required in _initialize_transforms()
         self._minimum_frequency = None
         self._maximum_frequency = None
         self._suppress = None
         self._detectors = None
-        super().__init__(**kwargs)
+        super().__init__(*args, **kwargs)
         self.t_ref = self.base_model_metadata["train_settings"]["data"]["ref_time"]
         self._pesummary_package = "gw"
         self._result_class = Result
@@ -1029,10 +1057,12 @@ class BeyondGRSampler(GWSampler):
     Handles parallel proxy chains and applies Beyond-GR specific transforms.
     """
     def __init__(self, model):
+        print("BeyondGRSampler initialized")
         super().__init__(model)
         self.proxies = [-4.0, -2.0, 0.0, 2.0, 4.0]
 
     def _initialize_transforms(self):
+        print("Initializing Beyond-GR transforms")
         super()._initialize_transforms()
         
         transforms_list = self.transform_pre.transforms.copy()
@@ -1064,10 +1094,26 @@ class BeyondGRSampler(GWSampler):
                 
         self.transform_pre = Compose(transforms_list)
 
+    def run_sampler(self, num_samples: int, batch_size: int = None):
+        if getattr(self, "_beyond_gr_pipeline_active", False):
+            return super().run_sampler(num_samples=num_samples, batch_size=batch_size)
+
+        self._beyond_gr_pipeline_active = True
+        try:
+            return self.run_beyond_gr_pipeline(
+                num_survival_samples=num_samples,
+                num_gibbs_iterations=30,
+                num_gibbs_samples=num_samples,
+                batch_size=batch_size if batch_size is not None else num_samples,
+            )
+        finally:
+            self._beyond_gr_pipeline_active = False
+
     def generate_proxy_chains(self, num_samples: int, batch_size: int = None):
         """
         Generate samples for all proxy chains independently.
         """
+        print("Generating proxy chains...")
         chains = {}
         if self.context is None:
             raise ValueError("Context must be set in order to run BeyondGRSampler.")
@@ -1075,12 +1121,26 @@ class BeyondGRSampler(GWSampler):
         
         for proxy in self.proxies:
             context_i = copy.deepcopy(base_context)
+            context_i.setdefault("parameters", {})
+
+            context_i["parameters"]["mass_ratio"] = 0.80
+            context_i["parameters"]["theta_jn"] = 0.50
+            context_i["parameters"]["luminosity_distance"] = 500.0
+
+            context_i["parameters"]["a_1"] = 0.40
+            context_i["parameters"]["a_2"] = 0.20
+
+            context_i["parameters"]["tilt_1"] = 0.0
+            context_i["parameters"]["tilt_2"] = 0.0
+
+            # temporary
+            context_i["parameters"]["chirp_mass"] = 35.0
             if "extrinsic_parameters" not in context_i:
                 context_i["extrinsic_parameters"] = {}
             context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
             
             self.context = context_i
-            self.run_sampler(num_samples=num_samples, batch_size=batch_size)
+            GWSampler.run_sampler(self, num_samples=num_samples, batch_size=batch_size)
             chains[proxy] = self.samples.copy()
             
         self.context = base_context
@@ -1090,6 +1150,7 @@ class BeyondGRSampler(GWSampler):
         """
         Evaluate chain survival based on Jacobian log|detJ| and log probability.
         """
+        print("Evaluating surviving chain...")
         survival_stats = {}
         highest_log_prob = -np.inf
         surviving_proxy = None
@@ -1154,6 +1215,7 @@ class BeyondGRSampler(GWSampler):
         """
         Run Gibbs refinement on the surviving chain.
         """
+        print("Starting Gibbs refinement...")
         current_proxy = surviving_proxy + np.median(initial_samples_dict["beta_residual"])
         print(f"Starting Gibbs refinement. Initial proxy = {current_proxy}")
         
@@ -1167,7 +1229,7 @@ class BeyondGRSampler(GWSampler):
             context_i["extrinsic_parameters"]["beta_proxy"] = current_proxy
             
             self.context = context_i
-            self.run_sampler(num_samples=num_samples, batch_size=batch_size)
+            GWSampler.run_sampler(self, num_samples=num_samples, batch_size=batch_size)
             
             current_samples_dict = self.samples.copy()
             median_res = np.median(current_samples_dict["beta_residual"])
@@ -1190,6 +1252,7 @@ class BeyondGRSampler(GWSampler):
         """
         Orchestrates the entire Beyond-GR pipeline (steps 1-7).
         """
+        print("Starting Beyond-GR inference pipeline")
         print("Step 1-4: Generating proxy chains")
         chains = self.generate_proxy_chains(num_samples=num_survival_samples, batch_size=batch_size)
         
@@ -1206,9 +1269,7 @@ class BeyondGRSampler(GWSampler):
         )
         
         # Save results in self.samples for compatibility with downstream processes
-        self.samples = final_samples_df.to_dict('list')
-        for k, v in self.samples.items():
-            self.samples[k] = np.array(v)
+        self.samples = final_samples_df
             
         print("Completed Beyond-GR Inference Pipeline Steps 1-7")
         return final_samples_df

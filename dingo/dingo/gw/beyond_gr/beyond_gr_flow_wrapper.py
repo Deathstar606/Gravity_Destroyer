@@ -45,6 +45,10 @@ class BeyondGRFlowWrapper(FlowWrapper):
             [embed_x, context_parameters],
             dim=-1,
         )
+        print(
+            "beta_proxy entering network:",
+            context_parameters[..., 0]
+        )
         #CONTEXT VECTOR: (batch_size, 134)
         return context_vector, logging_info
 

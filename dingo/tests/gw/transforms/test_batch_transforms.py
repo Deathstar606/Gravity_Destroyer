@@ -16,6 +16,7 @@ from dingo.gw.transforms import (
     SelectStandardizeRepackageParameters,
     RepackageStrainsAndASDS,
     UnpackDict,
+    OnlineBeyondGRRotation,
 )
 from dingo.gw.prior import default_extrinsic_dict
 from dingo.gw.domains import UniformFrequencyDomain
@@ -130,3 +131,29 @@ def test_unbatched_training_transforms(transform_list, input_sample_unbatched):
     output = transforms(input_sample_unbatched)
     assert output[0].ndim == 1
     assert output[1].ndim == 3
+
+
+def test_online_beyond_gr_rotation_is_noop_for_detector_strain(domain):
+    transform = OnlineBeyondGRRotation(domain)
+    input_sample = {
+        "waveform": {
+            "H1": np.random.rand(len(domain)) + 1j * np.random.rand(len(domain)),
+            "L1": np.random.rand(len(domain)) + 1j * np.random.rand(len(domain)),
+        },
+        "asds": {
+            "H1": np.ones(len(domain)),
+            "L1": np.ones(len(domain)),
+        },
+        "parameters": {
+            "chirp_mass": 30.0,
+            "mass_ratio": 0.5,
+            "luminosity_distance": 100.0,
+            "geocent_time": 0.0,
+        },
+        "extrinsic_parameters": {
+            "beta_proxy": 0.0,
+        },
+    }
+
+    output = transform(input_sample)
+    assert output == input_sample

@@ -148,6 +148,19 @@ class Sampler(object):
             x = context.copy()
             x["parameters"] = {}
             x["extrinsic_parameters"] = {}
+            print("========== RAW CONTEXT ==========")
+
+            for k,v in context.items():
+                print(k, type(v))
+
+                if isinstance(v, dict):
+                    print(" dict keys:", v.keys())
+
+                    for kk,vv in v.items():
+                        if hasattr(vv,"shape"):
+                            print("   ",kk,vv.shape)
+                        else:
+                            print("   ",kk,type(vv))
 
             # transforms_pre are expected to transform the data in the same way for each
             # requested sample. We therefore apply pre-processing only once.

@@ -66,12 +66,8 @@ class SampleBeyondGRProxy(object):
         
         return sample
 
-
-class OnlineBeyondGRRotation(object):
-    """
-    Applies inverse phase rotation to polarizations using beta_proxy.
-    Must be placed before ProjectOntoDetectors.
-    """
+#===========================FOR TRAINING===============================#
+""" class OnlineBeyondGRRotation(object):
     def __init__(self, domain):
         self.domain = domain
 
@@ -104,5 +100,55 @@ class OnlineBeyondGRRotation(object):
             phase_factor = compute_beyond_gr_phase_factor(freqs, chirp_mass, -beta_proxy, -3.0)
             sample["waveform"]["h_plus"] *= phase_factor
             sample["waveform"]["h_cross"] *= phase_factor
+
+        return sample """
+
+#===========================FOR INFERENCE===============================#
+class OnlineBeyondGRRotation:
+
+    def __init__(self, domain):
+        self.domain = domain
+
+    def __call__(self, sample):
+        print("==========DEEPER INSPECTION==================")
+        print(sample.keys())
+
+        for k, v in sample.items():
+            print(k, type(v))
+
+            if isinstance(v, dict):
+                print(v.keys())
+        print("============================")
+        print("waveform shape:",
+        sample["waveform"]["H1"].shape)
+
+        print("domain frequencies:",
+            self.domain.sample_frequencies.shape)
+
+        print("domain min idx:", self.domain.min_idx)
+        print("domain max idx:", self.domain.max_idx)
+
+        print("noise std shape:",
+            self.domain.noise_std.shape)
+
+        beta_proxy = sample["extrinsic_parameters"]["beta_proxy"]
+
+        chirp_mass = sample["extrinsic_parameters"].get(
+            "chirp_mass",
+            35.0      # temporary hardcoded
+        )
+
+        freqs = self.domain.sample_frequencies
+
+        phase_factor = compute_beyond_gr_phase_factor(
+            freqs,
+            chirp_mass,
+            -beta_proxy,
+            -3.0,
+        )
+
+        for ifo in sample["waveform"]:
+
+            sample["waveform"][ifo] *= phase_factor
 
         return sample

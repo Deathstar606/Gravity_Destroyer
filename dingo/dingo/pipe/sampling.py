@@ -9,7 +9,7 @@ from bilby_pipe.utils import parse_args, logger, convert_string_to_dict
 
 from dingo.core.posterior_models.build_model import build_model_from_kwargs
 from dingo.gw.data.event_dataset import EventDataset
-from dingo.gw.inference.gw_samplers import GWSampler, GWSamplerGNPE
+from dingo.gw.inference.gw_samplers import GWSamplerGNPE, create_sampler
 from dingo.gw.inference.inference_utils import prepare_log_prob
 from dingo.pipe.default_settings import DENSITY_RECOVERY_SETTINGS
 from dingo.pipe.parser import create_parser
@@ -123,7 +123,7 @@ class SamplingInput(Input):
             init_model = build_model_from_kwargs(
                 filename=self.model_init, device=self.device, load_training_info=False
             )
-            init_sampler = GWSampler(model=init_model)
+            init_sampler = create_sampler(model=init_model)
             self.dingo_sampler = GWSamplerGNPE(
                 model=model,
                 init_sampler=init_sampler,
@@ -132,7 +132,7 @@ class SamplingInput(Input):
 
         else:
             self.gnpe = False
-            self.dingo_sampler = GWSampler(model=model)
+            self.dingo_sampler = create_sampler(model=model)
 
         self.dingo_sampler.context = self.context
         self.dingo_sampler.event_metadata = self.event_metadata

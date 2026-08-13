@@ -1244,6 +1244,59 @@ class UpdateFrequencyRange(object):
 
         """
         # TODO: Write test for transform. Vectorize (not required for inference)
+        print("\n========== BEFORE UPDATE FREQUENCY RANGE ==========")
+
+        print("sample keys:", input_sample.keys())
+
+        print(
+            "waveform type:",
+            type(input_sample["waveform"])
+        )
+
+        print(
+            "waveform shape:",
+            getattr(input_sample["waveform"], "shape", None)
+        )
+
+        if isinstance(input_sample["waveform"], dict):
+            print(
+                "waveform keys:",
+                input_sample["waveform"].keys()
+            )
+
+        print(
+            "position type:",
+            type(input_sample.get("position")),
+            "shape:",
+            getattr(input_sample.get("position"), "shape", None)
+        )
+
+        print(
+            "drop_token_mask type:",
+            type(input_sample.get("drop_token_mask")),
+            "shape:",
+            getattr(input_sample.get("drop_token_mask"), "shape", None)
+        )
+
+        print("====================================================\n")
+        print(
+            "TYPE OF waveform BEFORE LOOP:",
+            type(input_sample["waveform"])
+        )
+
+        """ for ifo in input_sample["waveform"]:
+            print(
+                "LOOP VARIABLE:",
+                repr(ifo),
+                "TYPE:",
+                type(ifo)
+            )
+
+            if isinstance(input_sample["waveform"], dict):
+                print(
+                    f"{ifo}: waveform shape AFTER 🍎 = "
+                    f"{input_sample['waveform'][ifo].shape}"
+                ) """
         sample = input_sample.copy()
         blocks = np.unique(sample["position"][..., 2])
         num_blocks = len(blocks)
@@ -1353,5 +1406,43 @@ class UpdateFrequencyRange(object):
 
         # Update drop_token_mask
         sample["drop_token_mask"] = np.logical_or(mask, sample["drop_token_mask"])
+        print("\n========== AFTER STRAIN TOKENIZATION ==========")
+
+        print("sample keys:", sample.keys())
+
+        print(
+            "waveform type:",
+            type(sample["waveform"])
+        )
+
+        if isinstance(sample["waveform"], dict):
+            print("waveform keys:", sample["waveform"].keys())
+
+            for key, value in sample["waveform"].items():
+                print(
+                    f"waveform[{key}] type={type(value)}, "
+                    f"shape={getattr(value, 'shape', None)}"
+                )
+        else:
+            print(
+                "waveform shape:",
+                getattr(sample["waveform"], "shape", None)
+            )
+
+        print(
+            "position type:",
+            type(sample.get("position")),
+            "shape:",
+            getattr(sample.get("position"), "shape", None)
+        )
+
+        print(
+            "drop_token_mask type:",
+            type(sample.get("drop_token_mask")),
+            "shape:",
+            getattr(sample.get("drop_token_mask"), "shape", None)
+        )
+
+        print("===============================================\n")
 
         return sample

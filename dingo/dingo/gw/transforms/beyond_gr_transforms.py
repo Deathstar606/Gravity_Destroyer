@@ -104,51 +104,72 @@ class SampleBeyondGRProxy(object):
         return sample """
 
 #===========================FOR INFERENCE===============================#
-class OnlineBeyondGRRotation:
+class OnlineBeyondGRRotation(object):
+    """
+    Applies the Beyond-GR proxy phase rotation directly to raw detector
+    frequency-domain strain during inference.
 
-    def __init__(self, domain):
+    The phase factor is constructed on the SAME frequency grid as the
+    incoming detector strain.
+
+    This transform must run before whitening, repackaging, and tokenization.
+    """
+
+    def __init__(
+        self,
+        domain,
+        chirp_mass=30.0, #must be changed 
+        pn_exponent=-3.0,
+    ):
         self.domain = domain
+        self.chirp_mass = chirp_mass
+        self.pn_exponent = pn_exponent
 
-    def __call__(self, sample):
-        print("==========DEEPER INSPECTION==================")
-        print(sample.keys())
+    def __call__(self, input_sample):
+        sample = input_sample.copy()
 
-        for k, v in sample.items():
-            print(k, type(v))
-
-            if isinstance(v, dict):
-                print(v.keys())
-        print("============================")
-        print("waveform shape:",
-        sample["waveform"]["H1"].shape)
-
-        print("domain frequencies:",
-            self.domain.sample_frequencies.shape)
-
-        print("domain min idx:", self.domain.min_idx)
-        print("domain max idx:", self.domain.max_idx)
-
-        print("noise std shape:",
-            self.domain.noise_std.shape)
-
+        # ---------------------------------------------------------
+        # Retrieve beta proxy
+        # ---------------------------------------------------------
         beta_proxy = sample["extrinsic_parameters"]["beta_proxy"]
 
-        chirp_mass = sample["extrinsic_parameters"].get(
-            "chirp_mass",
-            35.0      # temporary hardcoded
-        )
+        # ---------------------------------------------------------
+        # Rotate every detector strain
+        # ---------------------------------------------------------
+        for ifo, waveform in sample["waveform"].items():
 
-        freqs = self.domain.sample_frequencies
+            waveform = np.asarray(waveform)
 
-        phase_factor = compute_beyond_gr_phase_factor(
-            freqs,
-            chirp_mass,
-            -beta_proxy,
-            -3.0,
-        )
+            num_bins = waveform.shape[-1]
 
-        for ifo in sample["waveform"]:
+            delta_f_event = 0.125
 
-            sample["waveform"][ifo] *= phase_factor
+            frequencies = (
+                np.arange(num_bins, dtype=np.float64)
+                * delta_f_event
+            )
+
+            if len(frequencies) != waveform.shape[-1]:
+                raise RuntimeError(
+                    f"Frequency grid length {len(frequencies)} does not match "
+                    f"waveform length {waveform.shape[-1]}."
+                )
+
+            # -----------------------------------------------------
+            # Build phase factor on the RAW EVENT frequency grid
+            # -----------------------------------------------------
+            phase_factor = compute_beyond_gr_phase_factor(
+                frequency_array=frequencies,
+                mass_value_solar_masses=self.chirp_mass,
+                coupling_parameter=-beta_proxy,
+                pn_exponent=self.pn_exponent,
+            )
+
+            print("phase factor shape:", phase_factor.shape)
+
+            # -----------------------------------------------------
+            # Apply phase rotation
+            # -----------------------------------------------------
+            sample["waveform"][ifo] = waveform * phase_factor
 
         return sample

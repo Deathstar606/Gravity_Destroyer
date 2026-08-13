@@ -86,7 +86,7 @@ class Sampler(object):
         self.inference_parameters = self.metadata["train_settings"]["data"][
             "inference_parameters"
         ]
-
+        
         self.samples = None
         self._build_domain()
 
@@ -113,6 +113,12 @@ class Sampler(object):
                 self.event_metadata = {}
             self.event_metadata["injection_parameters"] = value.pop("parameters")
         self._context = value
+        print("event_metadata object:", self.event_metadata)
+        print(
+            "event_metadata injection_parameters:",
+            self.event_metadata.get("injection_parameters")
+            if self.event_metadata is not None else None
+        )
 
     @property
     def event_metadata(self):
@@ -148,23 +154,64 @@ class Sampler(object):
             x = context.copy()
             x["parameters"] = {}
             x["extrinsic_parameters"] = {}
-            print("========== RAW CONTEXT ==========")
-
-            for k,v in context.items():
-                print(k, type(v))
-
-                if isinstance(v, dict):
-                    print(" dict keys:", v.keys())
-
-                    for kk,vv in v.items():
-                        if hasattr(vv,"shape"):
-                            print("   ",kk,vv.shape)
-                        else:
-                            print("   ",kk,type(vv))
 
             # transforms_pre are expected to transform the data in the same way for each
             # requested sample. We therefore apply pre-processing only once.
-            x = self.transform_pre(context)
+            #x = self.transform_pre(context)
+            x = context
+
+            print("\n========== TRANSFORM TRACE START ==========")
+            print("initial type:", type(x))
+
+            for i, transform in enumerate(self.transform_pre.transforms):
+                print(f"\n--- BEFORE transform {i}: {type(transform).__name__} ---")
+                print("type:", type(x))
+                if isinstance(x, dict):
+                    print("keys:", x.keys())
+
+                x = transform(x)
+
+                print(f"--- AFTER transform {i}: {type(transform).__name__} ---")
+                print("type:", type(x))
+
+                if isinstance(x, dict):
+                    print("keys:", x.keys())
+                    for key, value in x.items():
+                        print(
+                            f"  {key}: type={type(value)}, "
+                            f"shape={getattr(value, 'shape', None)}, "
+                            f"dtype={getattr(value, 'dtype', None)}"
+                        )
+                elif isinstance(x, (list, tuple)):
+                    print("list/tuple length:", len(x))
+                    for j, value in enumerate(x):
+                        print(
+                            f"  [{j}]: type={type(value)}, "
+                            f"shape={getattr(value, 'shape', None)}, "
+                            f"dtype={getattr(value, 'dtype', None)}"
+                        )
+                else:
+                    print(
+                        "shape:", getattr(x, "shape", None),
+                        "dtype:", getattr(x, "dtype", None)
+                    )
+
+            print("========== TRANSFORM TRACE END ==========\n")
+            print("\n========== TRANSFORM_PRE OUTPUT ==========")
+            print("x type:", type(x))
+
+            if isinstance(x, (list, tuple)):
+                print("x is list/tuple")
+                print("length:", len(x))
+                for i, xi in enumerate(x):
+                    print(f"x[{i}] type:", type(xi))
+                    print(f"x[{i}] shape:", getattr(xi, "shape", None))
+                    print(f"x[{i}] dtype:", getattr(xi, "dtype", None))
+            else:
+                print("x shape:", getattr(x, "shape", None))
+                print("x dtype:", getattr(x, "dtype", None))
+
+            print("==========================================\n")
             if type(x) is list or isinstance(x, tuple):
                 # If additional variables have to be passed to the embedding network,
                 # we need to add a batch dimension to all of them.

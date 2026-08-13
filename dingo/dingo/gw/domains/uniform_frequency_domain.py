@@ -6,7 +6,6 @@ import torch
 from dingo.gw.gwutils import *
 from .base_frequency_domain import BaseFrequencyDomain
 
-
 class UniformFrequencyDomain(BaseFrequencyDomain):
     """Defines the physical domain on which the data of interest live.
 

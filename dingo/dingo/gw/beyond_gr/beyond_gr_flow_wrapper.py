@@ -10,8 +10,8 @@ class BeyondGRFlowWrapper(FlowWrapper):
     """
     def __init__(self, flow, embedding_net=None):
         super().__init__(flow, embedding_net)
-
-    def _get_context(self, *x):
+#===========================FOR TRAINING===============================#
+    """ def _get_context(self, *x):
 
         print("========== _get_context ==========")
         print("len(x) =", len(x))
@@ -50,6 +50,61 @@ class BeyondGRFlowWrapper(FlowWrapper):
             context_parameters[..., 0]
         )
         #CONTEXT VECTOR: (batch_size, 134)
+        return context_vector, logging_info """
+#===========================FOR INFERENCE===============================#
+    def _get_context(self, *x):
+
+        print("========== _get_context ==========")
+        print("len(x) =", len(x))
+
+        for i, obj in enumerate(x):
+            print(f"\nArgument {i}")
+            print("type:", type(obj))
+            if hasattr(obj, "shape"):
+                print("shape:", obj.shape)
+
+        logging_info = {}
+
+        # Actual order produced by UnpackDict:
+        # x[0] = waveform
+        # x[1] = position
+        # x[2] = drop_token_mask
+        # x[3] = context_parameters
+
+        waveform = x[0]
+        position = x[1]
+        padding_mask = x[2]
+        context_parameters = x[3]
+
+        print("\n========== _get_context MAPPING ==========")
+        print("waveform:", waveform.shape)
+        print("position:", position.shape)
+        print("padding_mask:", padding_mask.shape)
+        print("context_parameters:", context_parameters.shape)
+        print("==========================================")
+
+        embed_x = self.embedding_net(
+            waveform,
+            position,
+            padding_mask,
+        )
+
+        if isinstance(embed_x, tuple):
+            embed_x, logging_info = embed_x
+
+        context_vector = torch.cat(
+            [embed_x, context_parameters],
+            dim=-1,
+        )
+
+        print(
+            "beta_proxy entering network:",
+            context_parameters[..., 0],
+        )
+
+        print("embed_x shape:", embed_x.shape)
+        print("context_vector shape:", context_vector.shape)
+
         return context_vector, logging_info
 
     def log_prob(self, y, *x) -> Tuple[torch.Tensor, dict[str, float]]:

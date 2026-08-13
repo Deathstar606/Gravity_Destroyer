@@ -111,6 +111,21 @@ class SamplingInput(Input):
         event_dataset = EventDataset(file_name=self.event_data_file)
         self.context = event_dataset.data
         self.event_metadata = event_dataset.settings
+        print("========== EVENT DOMAIN ==========")
+        print(self.event_metadata.get("domain"))
+        print("==================================")
+        print("EVENT METADATA")
+        print(self.event_metadata)
+
+        print("========== EVENT GRID ==========")
+
+        for ifo, waveform in self.context["waveform"].items():
+            print("IFO:", ifo)
+            print("waveform length:", len(waveform))
+
+        for ifo, asd in self.context["asds"].items():
+            print("IFO:", ifo)
+            print("ASD length:", len(asd))
 
     def _load_sampler(self):
         """Load the sampler and set its context based on event data."""

@@ -82,17 +82,12 @@ class SelectStandardizeRepackageParameters(object):
         sample: dict
             transformed sample
         """
-
         if not self.inverse:
             # Look for parameters in either the parameters dict, or the
             # extrinsic_parameters dict. extrinsic_parameters supersedes.
+            full_parameters = {**input_sample.get("parameters", {})}
             if "extrinsic_parameters" in input_sample:
-                full_parameters = {
-                    **input_sample["parameters"],
-                    **input_sample["extrinsic_parameters"],
-                }
-            else:
-                full_parameters = input_sample["parameters"]
+                full_parameters.update(input_sample["extrinsic_parameters"])
 
             sample = input_sample.copy()
             for k, v in self.parameters_dict.items():
@@ -103,12 +98,19 @@ class SelectStandardizeRepackageParameters(object):
                             dtype=torch.float32,
                             device=self.device,
                         )
+
                     elif isinstance(full_parameters[v[0]], np.ndarray):
                         standardized = np.empty(
-                            (*full_parameters[v[0]].shape, len(v)), dtype=np.float32
+                            (*full_parameters[v[0]].shape, len(v)),
+                            dtype=np.float32,
                         )
+
                     else:
-                        standardized = np.empty(len(v), dtype=np.float32)
+                        standardized = torch.empty(
+                            len(v),
+                            dtype=torch.float32,
+                            device=self.device,
+                        )
                     for idx, par in enumerate(v):
                         if self.std[par] == 0:
                             raise ValueError(
@@ -116,9 +118,30 @@ class SelectStandardizeRepackageParameters(object):
                                 f"This is not allowed. Please remove it from inference_parameters or create a new "
                                 f"dataset where std({par}) is not zero."
                             )
+                        if par == "beta_proxy":
+                            print(
+                                "RAW beta_proxy 🍎:",
+                                full_parameters["beta_proxy"],
+                                "mean:",
+                                self.mean["beta_proxy"],
+                                "std:",
+                                self.std["beta_proxy"],
+                                "standardized:",
+                                (
+                                    full_parameters["beta_proxy"] - self.mean["beta_proxy"]
+                                ) / self.std["beta_proxy"],
+                            )
                         standardized[..., idx] = (
                             full_parameters[par] - self.mean[par]
                         ) / self.std[par]
+                    print("\n========== STANDARDIZATION OUTPUT ==========")
+                    print("parameter group:", k)
+                    print("parameters:", v)
+                    print("standardized type:", type(standardized))
+                    print("standardized shape:", getattr(standardized, "shape", None))
+                    print("standardized dtype:", getattr(standardized, "dtype", None))
+                    print("standardized value:", standardized)
+                    print("============================================")
                     sample[k] = standardized
 
         else:

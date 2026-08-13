@@ -1060,6 +1060,16 @@ class BeyondGRSampler(GWSampler):
         print("BeyondGRSampler initialized")
         super().__init__(model)
         self.proxies = [-4.0, -2.0, 0.0, 2.0, 4.0]
+        self.beyond_gr_parameters = {
+            "mass_ratio": 0.80,
+            "a_1": 0.40,
+            "a_2": 0.20,
+            "tilt_1": 0.0,
+            "tilt_2": 0.0,
+            "theta_jn": 0.50,
+            "luminosity_distance": 500.0,
+            "chirp_mass": 35.0,
+        }
 
     def _initialize_transforms(self):
         print("Initializing Beyond-GR transforms")
@@ -1110,39 +1120,44 @@ class BeyondGRSampler(GWSampler):
             self._beyond_gr_pipeline_active = False
 
     def generate_proxy_chains(self, num_samples: int, batch_size: int = None):
-        """
-        Generate samples for all proxy chains independently.
-        """
         print("Generating proxy chains...")
+
         chains = {}
+
         if self.context is None:
-            raise ValueError("Context must be set in order to run BeyondGRSampler.")
+            raise ValueError("Context must be set to run BeyondGRSampler.")
+
         base_context = copy.deepcopy(self.context)
-        
+
         for proxy in self.proxies:
             context_i = copy.deepcopy(base_context)
-            context_i.setdefault("parameters", {})
 
-            context_i["parameters"]["mass_ratio"] = 0.80
-            context_i["parameters"]["theta_jn"] = 0.50
-            context_i["parameters"]["luminosity_distance"] = 500.0
+            # The Sampler.context setter removes "parameters", so keep an
+            # explicit copy in BeyondGRSampler and restore it before transforms.
+            context_i["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
 
-            context_i["parameters"]["a_1"] = 0.40
-            context_i["parameters"]["a_2"] = 0.20
-
-            context_i["parameters"]["tilt_1"] = 0.0
-            context_i["parameters"]["tilt_2"] = 0.0
-
-            # temporary
-            context_i["parameters"]["chirp_mass"] = 35.0
-            if "extrinsic_parameters" not in context_i:
-                context_i["extrinsic_parameters"] = {}
+            context_i.setdefault("extrinsic_parameters", {})
             context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
-            
+
             self.context = context_i
-            GWSampler.run_sampler(self, num_samples=num_samples, batch_size=batch_size)
+
+            # The context setter consumes "parameters"; restore them for transform_pre.
+            self.context["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
+
+            print("\n========== PROXY CONTEXT ==========")
+            print("proxy:", proxy)
+            print("parameters:", self.context["parameters"])
+            print("extrinsic_parameters:", self.context["extrinsic_parameters"])
+            print("===================================\n")
+
+            GWSampler.run_sampler(
+                self,
+                num_samples=num_samples,
+                batch_size=batch_size,
+            )
+
             chains[proxy] = self.samples.copy()
-            
+
         self.context = base_context
         return chains
 
@@ -1170,11 +1185,22 @@ class BeyondGRSampler(GWSampler):
                 samples_tensor[:, i] = (samples_tensor[:, i] - mean) / std
                 
             context_i = copy.deepcopy(self.context)
-            if "extrinsic_parameters" not in context_i:
-                context_i["extrinsic_parameters"] = {}
+
+            # Sampler.context may have consumed "parameters", so explicitly restore
+            # the fixed Beyond-GR conditioning parameters used for this test.
+            context_i["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
+
+            context_i.setdefault("extrinsic_parameters", {})
             context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
-            
+
+            print("\n========== SURVIVAL CONTEXT ==========")
+            print("proxy:", proxy)
+            print("parameters:", context_i["parameters"])
+            print("extrinsic_parameters:", context_i["extrinsic_parameters"])
+            print("======================================\n")
+
             x = self.transform_pre(context_i)
+
             if type(x) is list or isinstance(x, tuple):
                 x = [x_i.unsqueeze(0) for x_i in x]
             else:
@@ -1207,8 +1233,8 @@ class BeyondGRSampler(GWSampler):
             # Fallback if all chains are dead
             surviving_proxy = max(survival_stats.keys(), key=lambda p: survival_stats[p]["max_log_prob"])
             
-        print("Survival stats:", survival_stats)
-        print("Surviving proxy:", surviving_proxy)
+        print("💀 Survival stats:", survival_stats)
+        print("💀 Surviving proxy:", surviving_proxy)
         return surviving_proxy, survival_stats
 
     def gibbs_refinement(self, surviving_proxy, initial_samples_dict, num_iterations=30, num_samples=100000, batch_size=50000):

@@ -131,9 +131,28 @@ class SelectStandardizeRepackageParameters(object):
                                     full_parameters["beta_proxy"] - self.mean["beta_proxy"]
                                 ) / self.std["beta_proxy"],
                             )
-                        standardized[..., idx] = (
+                        """ standardized[..., idx] = (
                             full_parameters[par] - self.mean[par]
-                        ) / self.std[par]
+                        ) / self.std[par] """
+                        print("\n========== STANDARDIZATION KEY DEBUG ==========")
+                        print("requested parameter:", par)
+                        print("full_parameters keys:", list(full_parameters.keys()))
+                        print("parameters:", full_parameters.get("parameters", "<NO parameters KEY>"))
+                        print(
+                            "extrinsic_parameters:",
+                            full_parameters.get("extrinsic_parameters", "<NO extrinsic_parameters KEY>")
+                        )
+                        print("===============================================")
+                        value = full_parameters[par]
+
+                        if isinstance(value, np.generic):
+                            value = value.item()
+
+                        standardized[..., idx] = torch.as_tensor(
+                            (float(value) - self.mean[par]) / self.std[par],
+                            dtype=standardized.dtype,
+                            device=standardized.device,
+                        )
                     print("\n========== STANDARDIZATION OUTPUT ==========")
                     print("parameter group:", k)
                     print("parameters:", v)

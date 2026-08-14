@@ -113,25 +113,47 @@ class OnlineBeyondGRRotation(object):
     incoming detector strain.
 
     This transform must run before whitening, repackaging, and tokenization.
+
+    Parameters
+    ----------
+    domain : Domain
+        Dingo domain object (used only for attribute lookup; actual freq grid
+        is derived from the incoming waveform shape).
+    chirp_mass : float
+        Chirp mass in solar masses used for the phase rotation.  Must be set
+        to the posterior median from the original Dingo-T1 run — no default.
+    pn_exponent : float
+        Post-Newtonian exponent (default -3.0).
     """
 
     def __init__(
         self,
         domain,
-        chirp_mass=30.0, #must be changed 
-        pn_exponent=-3.0,
+        chirp_mass: float,
+        pn_exponent: float = -3.0,
     ):
+        if chirp_mass is None:
+            raise ValueError(
+                "OnlineBeyondGRRotation requires a valid chirp_mass. "
+                "Pass the Dingo-T1 posterior median via BeyondGRSampler."
+            )
         self.domain = domain
-        self.chirp_mass = chirp_mass
+        self.chirp_mass = float(chirp_mass)
         self.pn_exponent = pn_exponent
 
     def __call__(self, input_sample):
         sample = input_sample.copy()
 
         # ---------------------------------------------------------
-        # Retrieve beta proxy
+        # Retrieve beta proxy from extrinsic_parameters
         # ---------------------------------------------------------
         beta_proxy = sample["extrinsic_parameters"]["beta_proxy"]
+
+        # Concise diagnostic — verifies the actual value reaching this transform
+        print(
+            f"[OnlineBeyondGRRotation] beta_proxy={beta_proxy:+.4f}  "
+            f"chirp_mass={self.chirp_mass:.4f} M_sun"
+        )
 
         # ---------------------------------------------------------
         # Rotate every detector strain
@@ -141,7 +163,6 @@ class OnlineBeyondGRRotation(object):
             waveform = np.asarray(waveform)
 
             num_bins = waveform.shape[-1]
-
             delta_f_event = 0.125
 
             frequencies = (
@@ -165,11 +186,9 @@ class OnlineBeyondGRRotation(object):
                 pn_exponent=self.pn_exponent,
             )
 
-            print("phase factor shape:", phase_factor.shape)
-
             # -----------------------------------------------------
             # Apply phase rotation
             # -----------------------------------------------------
             sample["waveform"][ifo] = waveform * phase_factor
 
-        return sample
+        return sample

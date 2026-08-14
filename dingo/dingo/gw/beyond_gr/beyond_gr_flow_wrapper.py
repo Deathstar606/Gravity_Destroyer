@@ -53,57 +53,38 @@ class BeyondGRFlowWrapper(FlowWrapper):
         return context_vector, logging_info """
 #===========================FOR INFERENCE===============================#
     def _get_context(self, *x):
+        """
+        Build the 134-dim context vector for the BGR flow.
 
-        print("========== _get_context ==========")
-        print("len(x) =", len(x))
+        Expected input order from UnpackDict:
+          x[0] = waveform         [1, num_tokens, num_features]
+          x[1] = position         [1, num_blocks, num_tokens, 3]
+          x[2] = drop_token_mask  [1, num_tokens]
+          x[3] = context_parameters [1, 6]  (standardised)
 
-        for i, obj in enumerate(x):
-            print(f"\nArgument {i}")
-            print("type:", type(obj))
-            if hasattr(obj, "shape"):
-                print("shape:", obj.shape)
-
+        Output:
+          context_vector = [embed_x || context_parameters]  shape [1, 134]
+        """
         logging_info = {}
 
-        # Actual order produced by UnpackDict:
-        # x[0] = waveform
-        # x[1] = position
-        # x[2] = drop_token_mask
-        # x[3] = context_parameters
-
-        waveform = x[0]
-        position = x[1]
-        padding_mask = x[2]
+        waveform         = x[0]
+        position         = x[1]
+        padding_mask     = x[2]
         context_parameters = x[3]
 
-        print("\n========== _get_context MAPPING ==========")
-        print("waveform:", waveform.shape)
-        print("position:", position.shape)
-        print("padding_mask:", padding_mask.shape)
-        print("context_parameters:", context_parameters.shape)
-        print("==========================================")
-
-        embed_x = self.embedding_net(
-            waveform,
-            position,
-            padding_mask,
-        )
-
+        embed_x = self.embedding_net(waveform, position, padding_mask)
         if isinstance(embed_x, tuple):
             embed_x, logging_info = embed_x
 
-        context_vector = torch.cat(
-            [embed_x, context_parameters],
-            dim=-1,
-        )
+        context_vector = torch.cat([embed_x, context_parameters], dim=-1)
 
+        # Concise verification diagnostic
         print(
-            "beta_proxy entering network:",
-            context_parameters[..., 0],
+            f"[_get_context] embedding={tuple(embed_x.shape)}  "
+            f"context_params={tuple(context_parameters.shape)}  "
+            f"context_vector={tuple(context_vector.shape)}  "
+            f"beta_proxy(std)={context_parameters[..., 0].item():+.4f}"
         )
-
-        print("embed_x shape:", embed_x.shape)
-        print("context_vector shape:", context_vector.shape)
 
         return context_vector, logging_info
 

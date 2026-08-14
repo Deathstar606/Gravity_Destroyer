@@ -1054,55 +1054,195 @@ def check_detector_update(
 class BeyondGRSampler(GWSampler):
     """
     Sampler for Beyond-GR inference.
-    Handles parallel proxy chains and applies Beyond-GR specific transforms.
+
+    Initialization flow
+    -------------------
+    1. Loads the existing Dingo-T1 sampling result (HDF5) and extracts
+       posterior medians for the eight physical parameters required for the
+       Beyond-GR context.
+    2. Derives chi1z = a_1*cos(tilt_1), chi2z = a_2*cos(tilt_2).
+    3. Passes ``chirp_mass_median`` to OnlineBeyondGRRotation so every
+       proxy chain uses the same initial chirp-mass for the beta_proxy
+       phase rotation.
+    4. Constructs the five physical conditioning parameters
+       (mass_ratio, chi1z, chi2z, luminosity_distance, theta_jn) from the
+       same medians for every proxy chain.
+
+    The original Dingo-T1 model is never loaded again here — we simply read
+    the already-computed sampling HDF5 that lives alongside the BGR model in
+    the standard dingo_pipe output directory.
     """
+
+    # ------------------------------------------------------------------ #
+    # Default path to the existing T1 sampling result.                    #
+    # Can be overridden by setting sampler.t1_result_path before          #
+    # calling run_sampler().                                               #
+    # ------------------------------------------------------------------ #
+    _DEFAULT_T1_RESULT = (
+        "/home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model"
+        "/events/GW190701_203306/H1/result"
+        "/GW190701_203306_data0_1246048404-56_sampling.hdf5"
+    )
+
     def __init__(self, model):
         print("BeyondGRSampler initialized")
+        self._dingo_medians = None
+        self.t1_result_path = self._DEFAULT_T1_RESULT
         super().__init__(model)
         self.proxies = [-4.0, -2.0, 0.0, 2.0, 4.0]
-        self.beyond_gr_parameters = {
-            "mass_ratio": 0.80,
-            "a_1": 0.40,
-            "a_2": 0.20,
-            "tilt_1": 0.0,
-            "tilt_2": 0.0,
-            "theta_jn": 0.50,
-            "luminosity_distance": 500.0,
-            "chirp_mass": 35.0,
+
+        # Path to the Dingo-T1 sampling result; can be changed before run.
+        # Medians are populated lazily on first use to avoid loading the
+        # HDF5 during unit tests or when the sampler is constructed without
+        # intent to run the pipeline.
+
+    # ------------------------------------------------------------------ #
+    # Posterior-median loading                                            #
+    # ------------------------------------------------------------------ #
+
+    def _load_dingo_t1_medians(self) -> dict:
+        """
+        Load posterior medians from the existing Dingo-T1 sampling HDF5.
+
+        Returns
+        -------
+        dict with keys:
+            chirp_mass, mass_ratio, a_1, a_2, tilt_1, tilt_2,
+            luminosity_distance, theta_jn, chi1z, chi2z
+        """
+        import h5py
+
+        required_cols = [
+            "chirp_mass", "mass_ratio",
+            "a_1", "a_2", "tilt_1", "tilt_2",
+            "luminosity_distance", "theta_jn",
+        ]
+
+        path = self.t1_result_path
+        print(f"[BeyondGRSampler] Loading Dingo-T1 medians from: {path}")
+
+        with h5py.File(path, "r") as f:
+            samples_raw = f["samples"][()]
+
+        missing = [c for c in required_cols if c not in samples_raw.dtype.names]
+        if missing:
+            raise RuntimeError(
+                f"Dingo-T1 sampling result is missing columns: {missing}. "
+                f"Available: {samples_raw.dtype.names}"
+            )
+
+        medians = {col: float(np.median(samples_raw[col])) for col in required_cols}
+
+        # Derived spin projections — identical to what ComputeBeyondGRParameters does
+        medians["chi1z"] = medians["a_1"] * np.cos(medians["tilt_1"])
+        medians["chi2z"] = medians["a_2"] * np.cos(medians["tilt_2"])
+
+        print("[BeyondGRSampler] Dingo-T1 posterior medians extracted:")
+        print(f"  chirp_mass          = {medians['chirp_mass']:.4f} M_sun")
+        print(f"  mass_ratio          = {medians['mass_ratio']:.4f}")
+        print(f"  chi1z               = {medians['chi1z']:.4f}")
+        print(f"  chi2z               = {medians['chi2z']:.4f}")
+        print(f"  luminosity_distance = {medians['luminosity_distance']:.2f} Mpc")
+        print(f"  theta_jn            = {medians['theta_jn']:.4f} rad")
+
+        return medians
+
+    @property
+    def dingo_medians(self) -> dict:
+        """Lazily load and cache the Dingo-T1 posterior medians."""
+        if self._dingo_medians is None:
+            self._dingo_medians = self._load_dingo_t1_medians()
+        return self._dingo_medians
+
+    # ------------------------------------------------------------------ #
+    # Helper: build the ``parameters`` dict for a single proxy chain      #
+    # ------------------------------------------------------------------ #
+
+    def _build_chain_parameters(self) -> dict:
+        """
+        Return the physical conditioning parameters derived from the
+        Dingo-T1 posterior medians.
+
+        Keys returned:
+            mass_ratio, chi1z, chi2z, luminosity_distance, theta_jn
+
+        Note: ``chirp_mass`` is NOT included here because the BGR flow
+        predicts (beta_residual, chirp_mass) — it must NOT be injected as
+        a fixed context value.  ``a_1``, ``a_2``, ``tilt_1``, ``tilt_2``
+        are included so that ``ComputeBeyondGRParameters`` can (optionally)
+        re-derive chi1z / chi2z from them, but the pre-computed values are
+        also present to be robust.
+        """
+        m = self.dingo_medians
+        return {
+            "mass_ratio":          m["mass_ratio"],
+            "a_1":                 m["a_1"],
+            "a_2":                 m["a_2"],
+            "tilt_1":              m["tilt_1"],
+            "tilt_2":              m["tilt_2"],
+            "chi1z":               m["chi1z"],
+            "chi2z":               m["chi2z"],
+            "luminosity_distance": m["luminosity_distance"],
+            "theta_jn":            m["theta_jn"],
         }
+
+    # ------------------------------------------------------------------ #
+    # Transform initialisation                                            #
+    # ------------------------------------------------------------------ #
 
     def _initialize_transforms(self):
         print("Initializing Beyond-GR transforms")
         super()._initialize_transforms()
-        
+
         transforms_list = self.transform_pre.transforms.copy()
-        
-        # Insert OnlineBeyondGRRotation at the beginning to unrotate the raw strain
-        transforms_list.insert(0, OnlineBeyondGRRotation(self.domain))
-        
-        unpack_idx = next(i for i, t in enumerate(transforms_list) if type(t).__name__ == 'UnpackDict')
-        
+
+        # Insert OnlineBeyondGRRotation at position 0 so the raw
+        # detector strain is rotated BEFORE whitening and tokenisation.
+        # chirp_mass is populated from the Dingo-T1 posterior median.
+        transforms_list.insert(
+            0,
+            OnlineBeyondGRRotation(
+                domain=self.domain,
+                chirp_mass=self.dingo_medians["chirp_mass"],
+            ),
+        )
+
+        unpack_idx = next(
+            i for i, t in enumerate(transforms_list)
+            if type(t).__name__ == "UnpackDict"
+        )
+
         data_settings = self.metadata["train_settings"]["data"]
         context_parameters = data_settings.get("context_parameters", [])
-        
+
         if len(context_parameters) > 0:
-            # Compute chi1z, chi2z from a_1, tilt_1, etc.
+            # Compute chi1z, chi2z from a_1, tilt_1, etc. (idempotent if
+            # the pre-computed values are already present in the dict).
             transforms_list.insert(unpack_idx, ComputeBeyondGRParameters())
             unpack_idx += 1
-            
-            # Extract and standardize the context parameters (including beta_proxy)
+
+            # Standardise and repackage the context parameters (including
+            # beta_proxy) using the training statistics.
             standardize_transform = SelectStandardizeRepackageParameters(
                 {"context_parameters": context_parameters},
                 data_settings["standardization"],
                 device=self.model.device,
             )
             transforms_list.insert(unpack_idx, standardize_transform)
-            
-            unpack_transform = next(t for t in transforms_list if type(t).__name__ == 'UnpackDict')
+
+            # Make sure UnpackDict emits context_parameters downstream.
+            unpack_transform = next(
+                t for t in transforms_list
+                if type(t).__name__ == "UnpackDict"
+            )
             if "context_parameters" not in unpack_transform.selected_keys:
                 unpack_transform.selected_keys.append("context_parameters")
-                
+
         self.transform_pre = Compose(transforms_list)
+
+    # ------------------------------------------------------------------ #
+    # Public API                                                          #
+    # ------------------------------------------------------------------ #
 
     def run_sampler(self, num_samples: int, batch_size: int = None):
         if getattr(self, "_beyond_gr_pipeline_active", False):
@@ -1119,36 +1259,58 @@ class BeyondGRSampler(GWSampler):
         finally:
             self._beyond_gr_pipeline_active = False
 
-    def generate_proxy_chains(self, num_samples: int, batch_size: int = None):
-        print("Generating proxy chains...")
+    # ------------------------------------------------------------------ #
+    # Proxy-chain generation                                              #
+    # ------------------------------------------------------------------ #
 
-        chains = {}
+    def generate_proxy_chains(self, num_samples: int, batch_size: int = None):
+        """
+        Generate posterior samples for each of the five beta_proxy chains.
+
+        For every chain:
+          - ``parameters`` is populated from the Dingo-T1 posterior medians.
+          - ``extrinsic_parameters["beta_proxy"]`` is set to the current proxy.
+          - ``OnlineBeyondGRRotation`` uses the same chirp_mass median for
+            the phase rotation.
+
+        Returns
+        -------
+        dict mapping proxy value -> samples DataFrame
+        """
+        print("Generating proxy chains...")
+        print(f"Proxy values to run: {self.proxies}")
 
         if self.context is None:
             raise ValueError("Context must be set to run BeyondGRSampler.")
 
+        # Pre-fetch medians so we print the diagnostic once before the loop.
+        _ = self.dingo_medians
+
+        chains = {}
         base_context = copy.deepcopy(self.context)
 
         for proxy in self.proxies:
             context_i = copy.deepcopy(base_context)
 
-            # The Sampler.context setter removes "parameters", so keep an
-            # explicit copy in BeyondGRSampler and restore it before transforms.
-            context_i["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
-
+            # ---------------------------------------------------------- #
+            # Physical conditioning parameters from Dingo-T1 medians.     #
+            # NOTE: Sampler.context setter will pop "parameters" into     #
+            # event_metadata, so we bypass the setter and write directly  #
+            # to self._context after the assignment.                      #
+            # ---------------------------------------------------------- #
+            context_i["parameters"] = self._build_chain_parameters()
             context_i.setdefault("extrinsic_parameters", {})
             context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
 
+            # Assign via the setter (which pops "parameters") …
             self.context = context_i
+            # … then immediately restore them so transform_pre can see them.
+            self._context["parameters"] = self._build_chain_parameters()
 
-            # The context setter consumes "parameters"; restore them for transform_pre.
-            self.context["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
-
-            print("\n========== PROXY CONTEXT ==========")
-            print("proxy:", proxy)
-            print("parameters:", self.context["parameters"])
-            print("extrinsic_parameters:", self.context["extrinsic_parameters"])
-            print("===================================\n")
+            print(
+                f"\n[generate_proxy_chains] proxy={proxy:+.1f}  "
+                f"chirp_mass_for_rotation={self.dingo_medians['chirp_mass']:.4f}"
+            )
 
             GWSampler.run_sampler(
                 self,
@@ -1161,6 +1323,10 @@ class BeyondGRSampler(GWSampler):
         self.context = base_context
         return chains
 
+    # ------------------------------------------------------------------ #
+    # Chain-survival test                                                 #
+    # ------------------------------------------------------------------ #
+
     def evaluate_chain_survival(self, chains, detJ_threshold=1e-3):
         """
         Evaluate chain survival based on Jacobian log|detJ| and log probability.
@@ -1169,35 +1335,31 @@ class BeyondGRSampler(GWSampler):
         survival_stats = {}
         highest_log_prob = -np.inf
         surviving_proxy = None
-        
+
         data_settings = self.metadata["train_settings"]["data"]
         std_dict = data_settings["standardization"]
-        
+
         for proxy, samples_dict in chains.items():
-            # Get standardized samples
+            # Standardise samples for the Jacobian computation.
             samples_tensor = torch.tensor(
-                np.stack([samples_dict[param] for param in self.inference_parameters], axis=-1),
-                device=self.model.device, dtype=torch.float32
+                np.stack(
+                    [samples_dict[param] for param in self.inference_parameters],
+                    axis=-1,
+                ),
+                device=self.model.device,
+                dtype=torch.float32,
             )
             for i, param in enumerate(self.inference_parameters):
                 mean = std_dict["mean"][param]
                 std = std_dict["std"][param]
                 samples_tensor[:, i] = (samples_tensor[:, i] - mean) / std
-                
+
             context_i = copy.deepcopy(self.context)
 
-            # Sampler.context may have consumed "parameters", so explicitly restore
-            # the fixed Beyond-GR conditioning parameters used for this test.
-            context_i["parameters"] = copy.deepcopy(self.beyond_gr_parameters)
-
+            # Restore physical parameters from medians (same as in proxy chains).
+            context_i["parameters"] = self._build_chain_parameters()
             context_i.setdefault("extrinsic_parameters", {})
             context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
-
-            print("\n========== SURVIVAL CONTEXT ==========")
-            print("proxy:", proxy)
-            print("parameters:", context_i["parameters"])
-            print("extrinsic_parameters:", context_i["extrinsic_parameters"])
-            print("======================================\n")
 
             x = self.transform_pre(context_i)
 
@@ -1205,97 +1367,180 @@ class BeyondGRSampler(GWSampler):
                 x = [x_i.unsqueeze(0) for x_i in x]
             else:
                 x = [x.unsqueeze(0)]
-                
+
             self.model.network.eval()
             with torch.no_grad():
                 context_vector, _ = self.model.network._get_context(*x)
-                context_vector_expanded = context_vector.expand(len(samples_tensor), -1)
-                _, logabsdet = self.model.network.flow._transform(samples_tensor, context_vector_expanded)
-                
+                context_vector_expanded = context_vector.expand(
+                    len(samples_tensor), -1
+                )
+                _, logabsdet = self.model.network.flow._transform(
+                    samples_tensor, context_vector_expanded
+                )
+
             logabsdet_np = logabsdet.cpu().numpy()
             log_prob_np = samples_dict["log_prob"]
-            
+
             mean_logabsdet = np.mean(logabsdet_np)
             is_dead = np.abs(mean_logabsdet) < detJ_threshold
-            
+
             max_log_prob = np.max(log_prob_np)
             survival_stats[proxy] = {
                 "max_log_prob": max_log_prob,
                 "mean_logabsdet": mean_logabsdet,
-                "is_dead": is_dead
+                "is_dead": is_dead,
             }
-            
+
             if not is_dead and max_log_prob > highest_log_prob:
                 highest_log_prob = max_log_prob
                 surviving_proxy = proxy
-                
+
         if surviving_proxy is None:
-            # Fallback if all chains are dead
-            surviving_proxy = max(survival_stats.keys(), key=lambda p: survival_stats[p]["max_log_prob"])
-            
-        print("💀 Survival stats:", survival_stats)
+            # Fallback if all chains are dead — pick the best by log_prob.
+            surviving_proxy = max(
+                survival_stats.keys(),
+                key=lambda p: survival_stats[p]["max_log_prob"],
+            )
+
+        print("💀 Chain survival stats:", survival_stats)
         print("💀 Surviving proxy:", surviving_proxy)
         return surviving_proxy, survival_stats
 
-    def gibbs_refinement(self, surviving_proxy, initial_samples_dict, num_iterations=30, num_samples=100000, batch_size=50000):
-        """
-        Run Gibbs refinement on the surviving chain.
-        """
+    # ------------------------------------------------------------------ #
+    # Gibbs refinement                                                    #
+    # ------------------------------------------------------------------ #
+
+    def gibbs_refinement(
+        self,
+        surviving_proxy,
+        initial_samples_dict,
+        num_iterations=30,
+        num_samples=100000,
+        batch_size=50000,
+    ):
         print("Starting Gibbs refinement...")
-        current_proxy = surviving_proxy + np.median(initial_samples_dict["beta_residual"])
-        print(f"Starting Gibbs refinement. Initial proxy = {current_proxy}")
-        
+
+        current_proxy = float(
+            surviving_proxy
+            + np.median(initial_samples_dict["beta_residual"])
+        )
+
+        print(f"  Initial proxy = {current_proxy:.4f}")
+
+        medians = self.dingo_medians
         base_context = copy.deepcopy(self.context)
+
+        # Single authoritative source for fixed physical context.
+        base_parameters = {
+            "chirp_mass": medians["chirp_mass"],
+            "mass_ratio": medians["mass_ratio"],
+            "a_1": medians["a_1"],
+            "a_2": medians["a_2"],
+            "tilt_1": medians["tilt_1"],
+            "tilt_2": medians["tilt_2"],
+            "luminosity_distance": medians["luminosity_distance"],
+            "theta_jn": medians["theta_jn"],
+            "chi1z": medians["chi1z"],
+            "chi2z": medians["chi2z"],
+        }
+
+        base_context["extrinsic_parameters"] = {
+            "beta_proxy": current_proxy,
+        }
+
         final_samples = None
-        
+
         for i in range(num_iterations):
+
             context_i = copy.deepcopy(base_context)
-            if "extrinsic_parameters" not in context_i:
-                context_i["extrinsic_parameters"] = {}
+
+            context_i["parameters"] = copy.deepcopy(base_parameters)
             context_i["extrinsic_parameters"]["beta_proxy"] = current_proxy
-            
+
+            # Setter pops parameters.
             self.context = context_i
-            GWSampler.run_sampler(self, num_samples=num_samples, batch_size=batch_size)
-            
+
+            # Restore parameters required by transform_pre.
+            self.context["parameters"] = copy.deepcopy(base_parameters)
+
+            GWSampler.run_sampler(
+                self,
+                num_samples=num_samples,
+                batch_size=batch_size,
+            )
+
             current_samples_dict = self.samples.copy()
-            median_res = np.median(current_samples_dict["beta_residual"])
-            
-            beta_new = current_proxy + median_res
-            print(f"Gibbs Iteration {i+1}/{num_iterations}: proxy={current_proxy:.4f}, median_res={median_res:.4f}, new_proxy={beta_new:.4f}")
-            
+
+            median_res = float(
+                np.median(current_samples_dict["beta_residual"])
+            )
+
+            beta_new = float(current_proxy + median_res)
+
+            print(
+                f"  Gibbs {i+1}/{num_iterations}: "
+                f"proxy={current_proxy:.4f} "
+                f"median_res={median_res:.4f} "
+                f"new_proxy={beta_new:.4f}"
+            )
+
             if i == num_iterations - 1:
-                # Final reconstruction
-                current_samples_df = pd.DataFrame(current_samples_dict)
-                current_samples_df["beta_physical"] = current_proxy + current_samples_df["beta_residual"]
+                current_samples_df = pd.DataFrame(
+                    current_samples_dict
+                )
+
+                current_samples_df["beta_physical"] = (
+                    current_proxy
+                    + current_samples_df["beta_residual"]
+                )
+
                 final_samples = current_samples_df
-                
+
             current_proxy = beta_new
-            
+
+        # Restore sampler context.
         self.context = base_context
+        self.context["parameters"] = copy.deepcopy(base_parameters)
+
         return final_samples, current_proxy
 
-    def run_beyond_gr_pipeline(self, num_survival_samples=25000, num_gibbs_iterations=30, num_gibbs_samples=100000, batch_size=25000):
+    # ------------------------------------------------------------------ #
+    # Full pipeline orchestrator                                          #
+    # ------------------------------------------------------------------ #
+
+    def run_beyond_gr_pipeline(
+        self,
+        num_survival_samples=25000,
+        num_gibbs_iterations=30,
+        num_gibbs_samples=100000,
+        batch_size=25000,
+    ):
         """
-        Orchestrates the entire Beyond-GR pipeline (steps 1-7).
+        Orchestrates the entire Beyond-GR pipeline (Steps 1-7).
+
+        Step 1-4 : Generate proxy chains (5 parallel chains)
+        Step 5-6 : Chain survival detection
+        Step 7   : Gibbs refinement
         """
         print("Starting Beyond-GR inference pipeline")
+
         print("Step 1-4: Generating proxy chains")
-        chains = self.generate_proxy_chains(num_samples=num_survival_samples, batch_size=batch_size)
-        
+        chains = self.generate_proxy_chains(
+            num_samples=num_survival_samples, batch_size=batch_size
+        )
+
         print("Step 5-6: Evaluating chain survival")
         surviving_proxy, survival_stats = self.evaluate_chain_survival(chains)
-        
+
         print("Step 7: Gibbs refinement")
         final_samples_df, final_proxy = self.gibbs_refinement(
             surviving_proxy=surviving_proxy,
             initial_samples_dict=chains[surviving_proxy],
             num_iterations=num_gibbs_iterations,
             num_samples=num_gibbs_samples,
-            batch_size=batch_size
+            batch_size=batch_size,
         )
-        
-        # Save results in self.samples for compatibility with downstream processes
+
         self.samples = final_samples_df
-            
         print("Completed Beyond-GR Inference Pipeline Steps 1-7")
         return final_samples_df

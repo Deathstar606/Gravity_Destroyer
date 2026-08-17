@@ -1244,7 +1244,7 @@ class UpdateFrequencyRange(object):
 
         """
         # TODO: Write test for transform. Vectorize (not required for inference)
-        print("\n========== BEFORE UPDATE FREQUENCY RANGE ==========")
+        """ print("\n========== BEFORE UPDATE FREQUENCY RANGE ==========")
 
         print("sample keys:", input_sample.keys())
 
@@ -1282,7 +1282,7 @@ class UpdateFrequencyRange(object):
         print(
             "TYPE OF waveform BEFORE LOOP:",
             type(input_sample["waveform"])
-        )
+        ) """
 
         """ for ifo in input_sample["waveform"]:
             print(

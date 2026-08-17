@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 from typing import Optional, Union, Protocol
 
 import copy
@@ -61,7 +63,7 @@ def _is_beyond_gr_model(model) -> bool:
         for param in context_parameters
     )
 
-def create_sampler(model):
+def create_sampler(model): #somewhere previously we selected the model to be beyond gr model
     print("Creating sampler...")
     if _is_beyond_gr_model(model):
         print("Using BeyondGRSampler")
@@ -515,6 +517,7 @@ class GWSampler(GWSamplerMixin, Sampler):
 
         # postprocessing transforms:
         #   * de-standardize data and extract inference parameters
+        
         self.transform_post = SelectStandardizeRepackageParameters(
             {"inference_parameters": self.inference_parameters},
             self.metadata["train_settings"]["data"]["standardization"],
@@ -1097,12 +1100,85 @@ class BeyondGRSampler(GWSampler):
         # intent to run the pipeline.
 
     # ------------------------------------------------------------------ #
-    # Posterior-median loading                                            #
+    # Posterior-median loading and generation                             #
     # ------------------------------------------------------------------ #
+
+    def _find_dingo_t1_model(self) -> str:
+        """Find path to dingo_t1.pt model checkpoint."""
+        candidate_paths = []
+        if getattr(self, "t1_model_path", None):
+            candidate_paths.append(self.t1_model_path)
+        if "DINGO_T1_MODEL" in os.environ:
+            candidate_paths.append(os.environ["DINGO_T1_MODEL"])
+
+        # Check standard project directory
+        candidate_paths.append(
+            "/home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/dingo_t1.pt"
+        )
+
+        # Check relative to current model if available
+        if hasattr(self, "model") and getattr(self.model, "filename", None):
+            model_dir = os.path.dirname(os.path.abspath(self.model.filename))
+            candidate_paths.append(os.path.join(model_dir, "dingo_t1.pt"))
+
+        # Check relative paths
+        candidate_paths.append("dingo_t1.pt")
+        candidate_paths.append("02_inference_with_pretrained_model/dingo_t1.pt")
+
+        for p in candidate_paths:
+            if p and os.path.isfile(p):
+                return os.path.abspath(p)
+
+        raise FileNotFoundError(
+            f"Could not locate dingo_t1.pt. Checked candidate paths: {candidate_paths}"
+        )
+
+    def _generate_dingo_t1_posterior(self) -> pd.DataFrame:
+        """
+        Run inference using the original Dingo-T1 model to produce posterior samples
+        and save the resulting HDF5 file to self.t1_result_path.
+        """
+        from dingo.core.posterior_models.build_model import build_model_from_kwargs
+
+        t1_model_file = self._find_dingo_t1_model()
+        print(f"[BeyondGRSampler] Running initialization PE with Dingo-T1 model: {t1_model_file}")
+
+        if self.context is None:
+            raise ValueError(
+                "Cannot run Dingo-T1 initialization PE because sampler.context is None. "
+                "Set sampler.context and sampler.event_metadata first."
+            )
+
+        t1_model = build_model_from_kwargs(
+            filename=t1_model_file,
+            device=self.model.device,
+            load_training_info=False,
+        )
+        t1_sampler = GWSampler(model=t1_model)
+        t1_sampler.context = copy.deepcopy(self.context)
+        t1_sampler.event_metadata = copy.deepcopy(self.event_metadata)
+
+        print("[BeyondGRSampler] Sampling 10,000 points from Dingo-T1 model...")
+        t1_sampler.run_sampler(num_samples=10000, batch_size=5000)
+
+        # Save result to self.t1_result_path if specified
+        if self.t1_result_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.t1_result_path)), exist_ok=True)
+            result = t1_sampler.to_result()
+            result.to_file(file_name=self.t1_result_path)
+            print(f"[BeyondGRSampler] Saved Dingo-T1 posterior result to: {self.t1_result_path}")
+        print("\n========== ORIGINAL DINGO-T1 SAMPLES ==========")
+        print("shape:", t1_sampler.samples.shape)
+        print("columns:")
+        for col in t1_sampler.samples.columns:
+            print("  ", col)
+        print("===============================================")
+        return t1_sampler.samples
 
     def _load_dingo_t1_medians(self) -> dict:
         """
         Load posterior medians from the existing Dingo-T1 sampling HDF5.
+        If the file does not exist, runs Dingo-T1 inference to generate and save it.
 
         Returns
         -------
@@ -1119,19 +1195,29 @@ class BeyondGRSampler(GWSampler):
         ]
 
         path = self.t1_result_path
-        print(f"[BeyondGRSampler] Loading Dingo-T1 medians from: {path}")
 
-        with h5py.File(path, "r") as f:
-            samples_raw = f["samples"][()]
-
-        missing = [c for c in required_cols if c not in samples_raw.dtype.names]
-        if missing:
-            raise RuntimeError(
-                f"Dingo-T1 sampling result is missing columns: {missing}. "
-                f"Available: {samples_raw.dtype.names}"
-            )
-
-        medians = {col: float(np.median(samples_raw[col])) for col in required_cols}
+        if path and os.path.isfile(path):
+            print(f"[BeyondGRSampler] Loading existing Dingo-T1 medians from: {path}")
+            with h5py.File(path, "r") as f:
+                samples_raw = f["samples"][()]
+            missing = [c for c in required_cols if c not in samples_raw.dtype.names]
+            if missing:
+                raise RuntimeError(
+                    f"Dingo-T1 sampling result is missing columns: {missing}. "
+                    f"Available: {samples_raw.dtype.names}"
+                )
+            medians = {col: float(np.median(samples_raw[col])) for col in required_cols}
+        else:
+            print(f"[BeyondGRSampler] Dingo-T1 result file not found at: {path}")
+            print("[BeyondGRSampler] Automatically obtaining Dingo-T1 posterior...")
+            df = self._generate_dingo_t1_posterior()
+            missing = [c for c in required_cols if c not in df.columns]
+            if missing:
+                raise RuntimeError(
+                    f"Dingo-T1 generated samples are missing columns: {missing}. "
+                    f"Available: {df.columns.tolist()}"
+                )
+            medians = {col: float(df[col].median()) for col in required_cols}
 
         # Derived spin projections — identical to what ComputeBeyondGRParameters does
         medians["chi1z"] = medians["a_1"] * np.cos(medians["tilt_1"])
@@ -1198,12 +1284,12 @@ class BeyondGRSampler(GWSampler):
 
         # Insert OnlineBeyondGRRotation at position 0 so the raw
         # detector strain is rotated BEFORE whitening and tokenisation.
-        # chirp_mass is populated from the Dingo-T1 posterior median.
+        # chirp_mass is resolved lazily from the Dingo-T1 posterior median.
         transforms_list.insert(
             0,
             OnlineBeyondGRRotation(
                 domain=self.domain,
-                chirp_mass=self.dingo_medians["chirp_mass"],
+                chirp_mass=lambda: self.dingo_medians["chirp_mass"],
             ),
         )
 
@@ -1291,7 +1377,10 @@ class BeyondGRSampler(GWSampler):
 
         for proxy in self.proxies:
             context_i = copy.deepcopy(base_context)
-
+            print(
+            f"[generate_proxy_chains generate proxy 1️⃣] proxy={proxy} "
+            f"context_id={id(context_i)}"
+            )
             # ---------------------------------------------------------- #
             # Physical conditioning parameters from Dingo-T1 medians.     #
             # NOTE: Sampler.context setter will pop "parameters" into     #
@@ -1493,7 +1582,12 @@ class BeyondGRSampler(GWSampler):
                     current_proxy
                     + current_samples_df["beta_residual"]
                 )
-
+                print(
+                    "[BeyondGR] beta_residual range:",
+                    current_samples_df["beta_residual"].min(),
+                    "->",
+                    current_samples_df["beta_residual"].max(),
+                )
                 final_samples = current_samples_df
 
             current_proxy = beta_new
@@ -1540,7 +1634,54 @@ class BeyondGRSampler(GWSampler):
             num_samples=num_gibbs_samples,
             batch_size=batch_size,
         )
+        print("\n========== FINAL CHIRP MASS CHECK ==========")
 
+        print("Dingo-T1 median chirp_mass:",
+            self.dingo_medians["chirp_mass"])
+
+        print("Beyond-GR chirp_mass:")
+        print("  min    =", final_samples_df["chirp_mass"].min())
+        print("  max    =", final_samples_df["chirp_mass"].max())
+        print("  mean   =", final_samples_df["chirp_mass"].mean())
+        print("  median =", final_samples_df["chirp_mass"].median())
+        print("  std    =", final_samples_df["chirp_mass"].std())
+
+        print("============================================")
+        print("\n========== FINAL PARAMETER AUDIT 🫷==========")
+
+        required = [
+            "chirp_mass",
+            "mass_ratio",
+            "a_1",
+            "a_2",
+            "tilt_1",
+            "tilt_2",
+            "phi_12",
+            "phi_jl",
+            "theta_jn",
+            "luminosity_distance",
+            "geocent_time",
+            "ra",
+            "dec",
+            "psi",
+            "beta_residual",
+            "beta_physical",
+            "log_prob",
+        ]
+
+        for p in required:
+            print(f"{p:20s} : {p in final_samples_df.columns}")
+
+        print("============================================")
+        print("\n========== FINAL BEYOND-GR SAMPLES 🟥==========")
+        print("shape:", final_samples_df.shape)
+        print("columns:")
+        for col in final_samples_df.columns:
+            print("  ", col)
+
+        print("\nfirst row:")
+        print(final_samples_df.iloc[0].to_dict())
+        print("=============================================")
         self.samples = final_samples_df
         print("Completed Beyond-GR Inference Pipeline Steps 1-7")
         return final_samples_df

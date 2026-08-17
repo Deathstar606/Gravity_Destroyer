@@ -148,6 +148,11 @@ class Sampler(object):
         num_samples: int,
         context: Optional[dict] = None,
     ) -> dict:
+        print(
+            f"\n[_run_sampler begeining run sampler 2️⃣] id={id(context)} "
+            f"proxy={context.get('extrinsic_parameters', {}).get('beta_proxy')}"
+        )
+
         if not self.unconditional_model:
             if context is None:
                 raise ValueError("Context required to run sampler.")
@@ -159,8 +164,9 @@ class Sampler(object):
             # requested sample. We therefore apply pre-processing only once.
             #x = self.transform_pre(context)
             x = context
-
-            print("\n========== TRANSFORM TRACE START ==========")
+            for transform in self.transform_pre.transforms:
+                x = transform(x)
+            """ print("\n========== TRANSFORM TRACE START ==========")
             print("initial type:", type(x))
 
             for i, transform in enumerate(self.transform_pre.transforms):
@@ -211,7 +217,7 @@ class Sampler(object):
                 print("x shape:", getattr(x, "shape", None))
                 print("x dtype:", getattr(x, "dtype", None))
 
-            print("==========================================\n")
+            print("==========================================\n") """
             if type(x) is list or isinstance(x, tuple):
                 # If additional variables have to be passed to the embedding network,
                 # we need to add a batch dimension to all of them.
@@ -229,17 +235,244 @@ class Sampler(object):
         # so we always include this. For other architectures, it may make sense to
         # have a flag for whether to calculate the log_prob.
         self.model.network.eval()
+
         with torch.no_grad():
-            y, log_prob = self.model.sample_and_log_prob(*x, num_samples=num_samples)
+
+            y, log_prob = self.model.sample_and_log_prob(
+                *x,
+                num_samples=num_samples,
+            )
+
+            # =====================================================
+            # DEBUG: RAW FLOW OUTPUT
+            # =====================================================
+
+            print("\n========== RAW FLOW OUTPUT 💥 ==========")
+            print("y shape:", y.shape)
+            print("y dtype:", y.dtype)
+
+            if y.ndim >= 2 and y.shape[-1] == 2:
+
+                print("\nRAW FLOW DIMENSIONALITY:")
+                print("  number of flow parameters:", y.shape[-1])
+
+                print(
+                    "  flow parameter [0]: "
+                    f"min={y[..., 0].min().item():.6f}, "
+                    f"max={y[..., 0].max().item():.6f}, "
+                    f"mean={y[..., 0].mean().item():.6f}"
+                )
+
+                print(
+                    "  flow parameter [1]: "
+                    f"min={y[..., 1].min().item():.6f}, "
+                    f"max={y[..., 1].max().item():.6f}, "
+                    f"mean={y[..., 1].mean().item():.6f}"
+                )
+
+            print("========================================")
+
+
+            # =====================================================
+            # DEBUG: INVERSE STANDARDIZATION TEST
+            # =====================================================
+            #
+            # IMPORTANT:
+            # y is still in standardized flow space here.
+            #
+            # We manually reconstruct the physical values using
+            # the same mean/std that transform_post should use.
+            #
+            # This tells us whether the unusual values are already
+            # present in the raw flow output or are introduced by
+            # transform_post.
+            # =====================================================
+
+            if y.ndim >= 2 and y.shape[-1] == 2:
+
+                print("\n========== INVERSE STANDARDIZATION TEST ==========")
+
+                # Flow parameter ordering MUST correspond to:
+                #
+                # y[..., 0] -> beta_residual
+                # y[..., 1] -> chirp_mass
+
+                beta_mean = self.transform_post.mean["beta_residual"]
+                beta_std = self.transform_post.std["beta_residual"]
+
+                chirp_mean = self.transform_post.mean["chirp_mass"]
+                chirp_std = self.transform_post.std["chirp_mass"]
+
+                print("beta_residual mean:", beta_mean)
+                print("beta_residual std :", beta_std)
+
+                print("chirp_mass mean:", chirp_mean)
+                print("chirp_mass std :", chirp_std)
+
+                beta_manual = (
+                    y[..., 0] * beta_std
+                    + beta_mean
+                )
+
+                chirp_manual = (
+                    y[..., 1] * chirp_std
+                    + chirp_mean
+                )
+
+                print("\nManual inverse-standardized values:")
+
+                print(
+                    "beta_residual:"
+                    f" min={beta_manual.min().item():.6f},"
+                    f" max={beta_manual.max().item():.6f},"
+                    f" mean={beta_manual.mean().item():.6f}"
+                )
+
+                print(
+                    "chirp_mass:"
+                    f" min={chirp_manual.min().item():.6f},"
+                    f" max={chirp_manual.max().item():.6f},"
+                    f" mean={chirp_manual.mean().item():.6f}"
+                )
+
+                # -------------------------------------------------
+                # Verify that transform_post produces the same
+                # values as our manual inverse standardization.
+                # -------------------------------------------------
+
+                debug_transformed = self.transform_post(
+                    {
+                        "parameters": y.clone(),
+                        "log_prob": log_prob.clone(),
+                    }
+                )
+
+                debug_result = debug_transformed["parameters"]
+
+                beta_post = debug_result["beta_residual"]
+                chirp_post = debug_result["chirp_mass"]
+
+                beta_difference = torch.max(
+                    torch.abs(beta_post - beta_manual)
+                ).item()
+
+                chirp_difference = torch.max(
+                    torch.abs(chirp_post - chirp_manual)
+                ).item()
+
+                print("\nComparison with transform_post:")
+
+                print(
+                    "max |beta_residual_manual - transform_post| =",
+                    beta_difference,
+                )
+
+                print(
+                    "max |chirp_mass_manual - transform_post| =",
+                    chirp_difference,
+                )
+
+                print("===================================================")
 
         if not self.unconditional_model:
-            # Squeeze the batch dimension added earlier (and potential num_samples=1 in NormalizingFlow).
+            # Squeeze the batch dimension added earlier
+            # (and potential num_samples=1 in NormalizingFlow).
             y = y.squeeze()
             log_prob = log_prob.squeeze()
 
-        samples = self.transform_post({"parameters": y, "log_prob": log_prob})
+        # ============================================================
+        # DEBUG: IDENTIFY ACTUAL FLOW PARAMETER KEYS
+        # ============================================================
+        print("\n========== FLOW OUTPUT PARAMETER DEBUG ==========")
+
+        print("Sampler class:", type(self).__name__)
+        print("transform_post type:", type(self.transform_post).__name__)
+
+        print("Raw flow tensor shape:", y.shape)
+        print("Raw flow tensor dtype:", y.dtype)
+
+        # Inspect the actual parameter configuration used by
+        # SelectStandardizeRepackageParameters.
+        if hasattr(self.transform_post, "parameters"):
+            print(
+                "transform_post.parameters:",
+                self.transform_post.parameters
+            )
+
+        if hasattr(self.transform_post, "inference_parameters"):
+            print(
+                "transform_post.inference_parameters:",
+                self.transform_post.inference_parameters
+            )
+
+        if hasattr(self, "inference_parameters"):
+            print(
+                "sampler.inference_parameters:",
+                self.inference_parameters
+            )
+
+        # Inspect available standardization keys.
+        if hasattr(self.transform_post, "mean"):
+            print(
+                "transform_post.mean keys:",
+                list(self.transform_post.mean.keys())
+            )
+
+        if hasattr(self.transform_post, "std"):
+            print(
+                "transform_post.std keys:",
+                list(self.transform_post.std.keys())
+            )
+
+        # Print raw statistics according to tensor dimensionality.
+        if y.ndim >= 2:
+            print("\nRAW FLOW DIMENSIONALITY:")
+            print("  number of flow parameters:", y.shape[-1])
+
+            for idx in range(y.shape[-1]):
+                print(
+                    f"  flow parameter [{idx}]: "
+                    f"min={y[..., idx].min().item():.6f}, "
+                    f"max={y[..., idx].max().item():.6f}, "
+                    f"mean={y[..., idx].mean().item():.6f}"
+                )
+
+        print("================================================\n")
+
+        samples = self.transform_post(
+            {
+                "parameters": y,
+                "log_prob": log_prob,
+            }
+        )
+
         result = samples["parameters"]
         result["log_prob"] = samples["log_prob"]
+
+        # ============================================================
+        # DEBUG: ACTUAL POST-TRANSFORM OUTPUT KEYS
+        # ============================================================
+        print("\n========== POST-TRANSFORM PARAMETER DEBUG ==========")
+
+        print("result type:", type(result))
+
+        if hasattr(result, "keys"):
+            print("result keys:", list(result.keys()))
+
+        for key, value in result.items():
+            try:
+                if hasattr(value, "min"):
+                    print(
+                        f"{key}: "
+                        f"min={value.min()}, "
+                        f"max={value.max()}, "
+                        f"mean={value.mean()}"
+                    )
+            except Exception as e:
+                print(f"{key}: unable to calculate statistics: {e}")
+
+        print("====================================================\n")
+
         return result
 
     def run_sampler(

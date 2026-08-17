@@ -129,17 +129,28 @@ class OnlineBeyondGRRotation(object):
     def __init__(
         self,
         domain,
-        chirp_mass: float,
+        chirp_mass=None,
         pn_exponent: float = -3.0,
     ):
-        if chirp_mass is None:
-            raise ValueError(
-                "OnlineBeyondGRRotation requires a valid chirp_mass. "
-                "Pass the Dingo-T1 posterior median via BeyondGRSampler."
-            )
         self.domain = domain
-        self.chirp_mass = float(chirp_mass)
+        self._chirp_mass = chirp_mass
         self.pn_exponent = pn_exponent
+
+    @property
+    def chirp_mass(self) -> float:
+        if callable(self._chirp_mass):
+            return float(self._chirp_mass())
+        if self._chirp_mass is not None:
+            return float(self._chirp_mass)
+        raise ValueError(
+            "OnlineBeyondGRRotation requires a valid chirp_mass. "
+            "Pass the Dingo-T1 posterior median via BeyondGRSampler."
+        )
+
+    @chirp_mass.setter
+    def chirp_mass(self, value):
+        self._chirp_mass = value
+
 
     def __call__(self, input_sample):
         sample = input_sample.copy()

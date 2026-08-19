@@ -1316,13 +1316,18 @@ class BeyondGRSampler(GWSampler):
             )
             transforms_list.insert(unpack_idx, standardize_transform)
 
-            # Make sure UnpackDict emits context_parameters downstream.
+            # Make sure UnpackDict emits context_parameters downstream,
+            # positioned right after waveform to match training convention.
             unpack_transform = next(
                 t for t in transforms_list
                 if type(t).__name__ == "UnpackDict"
             )
             if "context_parameters" not in unpack_transform.selected_keys:
-                unpack_transform.selected_keys.append("context_parameters")
+                if "waveform" in unpack_transform.selected_keys:
+                    wf_idx = unpack_transform.selected_keys.index("waveform")
+                    unpack_transform.selected_keys.insert(wf_idx + 1, "context_parameters")
+                else:
+                    unpack_transform.selected_keys.append("context_parameters")
 
         self.transform_pre = Compose(transforms_list)
 

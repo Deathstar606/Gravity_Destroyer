@@ -10,88 +10,77 @@ class BeyondGRFlowWrapper(FlowWrapper):
     """
     def __init__(self, flow, embedding_net=None):
         super().__init__(flow, embedding_net)
-#===========================FOR TRAINING===============================#
-    """ def _get_context(self, *x):
-
-        print("========== _get_context ==========")
-        print("len(x) =", len(x))
-
-        for i, obj in enumerate(x):
-            print(f"\nArgument {i}")
-            print("type:", type(obj))
-
-            if hasattr(obj, "shape"):
-                print("shape:", obj.shape)
-
-            if isinstance(obj, dict):
-                print(obj.keys())
-
-        logging_info = {}
-
-        waveform = x[0]
-        context_parameters = x[1]
-        position = x[2]
-        padding_mask = x[3]
-        embed_x = self.embedding_net(
-            waveform,
-            position,
-            padding_mask,
-        )
-
-        if isinstance(embed_x, tuple):
-            embed_x, logging_info = embed_x
-        #WRAPPER
-        context_vector = torch.cat(
-            [embed_x, context_parameters],
-            dim=-1,
-        )
-        print(
-            "beta_proxy entering network:",
-            context_parameters[..., 0]
-        )
-        #CONTEXT VECTOR: (batch_size, 134)
-        return context_vector, logging_info """
-#===========================FOR INFERENCE===============================#
     def _get_context(self, *x):
         """
-        Build the 134-dim context vector for the BGR flow.
+        Build the unified 134-dim context vector for both training and inference.
 
-        Expected input order from UnpackDict:
-          x[0] = waveform         [1, num_tokens, num_features]
-          x[1] = position         [1, num_blocks, num_tokens, 3]
-          x[2] = drop_token_mask  [1, num_tokens]
-          x[3] = context_parameters [1, 6]  (standardised)
-
-        Output:
-          context_vector = [embed_x || context_parameters]  shape [1, 134]
+        Expected inputs in *x (in either training or inference order):
+          - waveform: shape [B, num_tokens, num_features] (e.g., [B, 207, 48])
+          - context_parameters: shape [B, 6]
+          - position: shape [B, num_tokens, 3] (or 5)
+          - padding_mask: shape [B, num_tokens]
         """
+        if len(x) == 0:
+            return None, {}
+
         logging_info = {}
 
-        waveform         = x[0]
-        position         = x[1]
-        padding_mask     = x[2]
-        context_parameters = x[3]
+        if len(x) == 4:
+            # Unpack robustly based on tensor signatures to support both:
+            # Training order: (waveform, context_parameters, position, padding_mask)
+            # Inference order: (waveform, position, padding_mask, context_parameters)
+            waveform = x[0]
+            if x[1].ndim == 2 and x[1].shape[-1] == 6:
+                # Training order: x[1] is context_parameters (6-D)
+                context_parameters = x[1]
+                position = x[2]
+                padding_mask = x[3]
+            elif x[3].ndim == 2 and x[3].shape[-1] == 6:
+                # Inference order: x[3] is context_parameters (6-D)
+                position = x[1]
+                padding_mask = x[2]
+                context_parameters = x[3]
+            else:
+                # General semantic fallback by shape & dimension
+                context_parameters = None
+                position = None
+                padding_mask = None
+                for item in x[1:]:
+                    if not isinstance(item, torch.Tensor):
+                        continue
+                    if item.ndim == 3 and item.shape[-1] in (3, 5):
+                        position = item
+                    elif item.ndim == 2 and (item.dtype == torch.bool or (hasattr(waveform, "shape") and item.shape[-1] == waveform.shape[1])):
+                        padding_mask = item
+                    elif item.ndim == 2:
+                        context_parameters = item
 
-        embed_x = self.embedding_net(waveform, position, padding_mask)
-        if isinstance(embed_x, tuple):
-            embed_x, logging_info = embed_x
+                if context_parameters is None:
+                    context_parameters = x[1] if x[1].ndim == 2 else x[3]
+                if position is None:
+                    position = x[2] if x[2].ndim == 3 else x[1]
+                if padding_mask is None:
+                    padding_mask = x[3] if position is not x[3] and context_parameters is not x[3] else x[2]
+
+        elif len(x) == 1:
+            return x[0], logging_info
+        else:
+            raise ValueError(f"Unexpected number of context arguments in _get_context: {len(x)}")
+
+        if self.embedding_net is not None:
+            embed_x = self.embedding_net(waveform, position, padding_mask)
+            if isinstance(embed_x, tuple):
+                embed_x, logging_info = embed_x
+        else:
+            embed_x = waveform
 
         context_vector = torch.cat([embed_x, context_parameters], dim=-1)
-
-        # Concise verification diagnostic
-        print(
-            f"[_get_context] embedding={tuple(embed_x.shape)}  "
-            f"context_params={tuple(context_parameters.shape)}  "
-            f"context_vector={tuple(context_vector.shape)}  "
-            f"beta_proxy(std)={context_parameters[..., 0].item():+.4f}"
-        )
 
         return context_vector, logging_info
 
     def log_prob(self, y, *x) -> Tuple[torch.Tensor, dict[str, float]]:
         context, logging_info = self._get_context(*x)
         if context is not None:
-            #FLOW INPUT
             return self.flow.log_prob(y, context), logging_info
         else:
             return self.flow.log_prob(y), logging_info
@@ -111,4 +100,4 @@ class BeyondGRFlowWrapper(FlowWrapper):
             return self.flow.sample_and_log_prob(num_samples)
 
     def forward(self, y, *x) -> Tuple[torch.Tensor, dict[str, float]]:
-        return self.log_prob(y, *x)
+        return self.log_prob(y, *x)

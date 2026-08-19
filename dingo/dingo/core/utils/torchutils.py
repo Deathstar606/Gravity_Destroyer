@@ -1,5 +1,6 @@
+from __future__ import annotations
 import os
-from typing import Any, Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 
 import bilby
 import numpy as np
@@ -12,7 +13,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dingo.core.nn.cfnets import ContinuousFlow
-from dingo.core.nn.nsf import FlowWrapper
+if TYPE_CHECKING:
+    from dingo.core.nn.nsf import FlowWrapper
 
 
 def get_cuda_info() -> dict[str, Any]:

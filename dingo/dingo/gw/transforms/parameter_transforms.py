@@ -63,148 +63,233 @@ class SelectStandardizeRepackageParameters(object):
 
     def __call__(self, input_sample, as_type=None):
         """
-        * if self.inverse == False:
-            Normalize parameters (specified in self.parameters_dict),
-            repackage to numpy array.
-        * if self.inverse == True:
-            Applies only to sample['inference_parameters'].
-            Undo normalization and return as type self.as_type.
-            Also transform input_sample['log_prob'], if present, according to the
-            change-of-variables rule.
+        Standardize parameters for the forward transform and
+        de-standardize inference parameters for the inverse transform.
 
-        Parameters
-        ----------
-        input_sample: dict
-            input sample
+        This implementation is compatible with both:
+            - training
+            - inference
 
-        Returns
-        -------
-        sample: dict
-            transformed sample
+        It supports:
+            - torch.Tensor
+            - numpy.ndarray
+            - numpy scalar values
+            - Python scalar values
+
+        For inverse=True, only parameters listed in
+        self.parameters_dict["inference_parameters"] are de-standardized.
         """
+
+        if as_type is None:
+            as_type = self.as_type
+
+        # =========================================================
+        # FORWARD TRANSFORM
+        # =========================================================
         if not self.inverse:
-            # Look for parameters in either the parameters dict, or the
-            # extrinsic_parameters dict. extrinsic_parameters supersedes.
-            full_parameters = {**input_sample.get("parameters", {})}
+
+            # -----------------------------------------------------
+            # Merge parameters and extrinsic_parameters.
+            #
+            # extrinsic_parameters takes precedence, as in Dingo's
+            # original behavior.
+            # -----------------------------------------------------
+            full_parameters = {
+                **input_sample.get("parameters", {})
+            }
+
             if "extrinsic_parameters" in input_sample:
-                full_parameters.update(input_sample["extrinsic_parameters"])
+                full_parameters.update(
+                    input_sample["extrinsic_parameters"]
+                )
 
             sample = input_sample.copy()
+
+            # -----------------------------------------------------
+            # Standardize each requested parameter group.
+            # -----------------------------------------------------
             for k, v in self.parameters_dict.items():
-                if len(v) > 0:
-                    if isinstance(full_parameters[v[0]], torch.Tensor):
-                        standardized = torch.empty(
-                            (*full_parameters[v[0]].shape, len(v)),
-                            dtype=torch.float32,
-                            device=self.device,
+
+                if len(v) == 0:
+                    continue
+
+                first_value = full_parameters[v[0]]
+
+                # -------------------------------------------------
+                # Determine whether the output should be torch
+                # or numpy.
+                # -------------------------------------------------
+                if isinstance(first_value, torch.Tensor):
+
+                    standardized = torch.empty(
+                        (*first_value.shape, len(v)),
+                        dtype=torch.float32,
+                        device=first_value.device,
+                    )
+
+                elif isinstance(first_value, np.ndarray):
+
+                    standardized = np.empty(
+                        (*first_value.shape, len(v)),
+                        dtype=np.float32,
+                    )
+
+                else:
+
+                    # Scalar context values.
+                    #
+                    # This is important for inference, where values
+                    # such as beta_proxy may be ordinary Python/numpy
+                    # scalars rather than tensors.
+                    standardized = torch.empty(
+                        len(v),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+
+                # -------------------------------------------------
+                # Standardize each parameter.
+                # -------------------------------------------------
+                for idx, par in enumerate(v):
+
+                    if self.std[par] == 0:
+                        raise ValueError(
+                            f"Parameter {par} with standard deviation zero "
+                            f"is included in inference parameters. "
+                            f"This is not allowed. Please remove it from "
+                            f"inference_parameters or create a new dataset "
+                            f"where std({par}) is not zero."
                         )
 
-                    elif isinstance(full_parameters[v[0]], np.ndarray):
-                        standardized = np.empty(
-                            (*full_parameters[v[0]].shape, len(v)),
-                            dtype=np.float32,
+                    value = full_parameters[par]
+
+                    # =================================================
+                    # TORCH VALUE
+                    # =================================================
+                    if isinstance(value, torch.Tensor):
+
+                        standardized_value = (
+                            value - self.mean[par]
+                        ) / self.std[par]
+
+                        # Ensure dtype matches output.
+                        standardized_value = standardized_value.to(
+                            dtype=torch.float32
                         )
 
+                        if isinstance(standardized, torch.Tensor):
+
+                            standardized[..., idx] = standardized_value
+
+                        else:
+                            standardized[..., idx] = (
+                                standardized_value.detach().cpu().numpy()
+                            )
+
+                    # =================================================
+                    # NUMPY ARRAY / NUMPY SCALAR
+                    # =================================================
                     else:
-                        standardized = torch.empty(
-                            len(v),
-                            dtype=torch.float32,
-                            device=self.device,
-                        )
-                    for idx, par in enumerate(v):
-                        if self.std[par] == 0:
-                            raise ValueError(
-                                f"Parameter {par} with standard deviation zero is included in inference parameters. "
-                                f"This is not allowed. Please remove it from inference_parameters or create a new "
-                                f"dataset where std({par}) is not zero."
+
+                        value_numeric = np.asarray(value)
+
+                        standardized_value = (
+                            value_numeric - self.mean[par]
+                        ) / self.std[par]
+
+                        if isinstance(standardized, torch.Tensor):
+
+                            standardized[..., idx] = torch.as_tensor(
+                                standardized_value,
+                                dtype=torch.float32,
+                                device=standardized.device,
                             )
-                        if par == "beta_proxy":
-                            print(
-                                "RAW beta_proxy 🍎:",
-                                full_parameters["beta_proxy"],
-                                "mean:",
-                                self.mean["beta_proxy"],
-                                "std:",
-                                self.std["beta_proxy"],
-                                "standardized:",
-                                (
-                                    full_parameters["beta_proxy"] - self.mean["beta_proxy"]
-                                ) / self.std["beta_proxy"],
+
+                        else:
+
+                            standardized[..., idx] = np.asarray(
+                                standardized_value,
+                                dtype=np.float32,
                             )
-                        """ standardized[..., idx] = (
-                            full_parameters[par] - self.mean[par]
-                        ) / self.std[par] """
-                        print("\n========== STANDARDIZATION KEY DEBUG ==========")
-                        print("requested parameter:", par)
-                        print("full_parameters keys:", list(full_parameters.keys()))
-                        print("parameters:", full_parameters.get("parameters", "<NO parameters KEY>"))
-                        print(
-                            "extrinsic_parameters:",
-                            full_parameters.get("extrinsic_parameters", "<NO extrinsic_parameters KEY>")
-                        )
-                        print("===============================================")
-                        value = full_parameters[par]
 
-                        if isinstance(value, np.generic):
-                            value = value.item()
+                sample[k] = standardized
 
-                        standardized[..., idx] = torch.as_tensor(
-                            (float(value) - self.mean[par]) / self.std[par],
-                            dtype=standardized.dtype,
-                            device=standardized.device,
-                        )
-                    print("\n========== STANDARDIZATION OUTPUT ==========")
-                    print("parameter group:", k)
-                    print("parameters:", v)
-                    print("standardized type:", type(standardized))
-                    print("standardized shape:", getattr(standardized, "shape", None))
-                    print("standardized dtype:", getattr(standardized, "dtype", None))
-                    print("standardized value:", standardized)
-                    print("============================================")
-                    sample[k] = standardized
+            return sample
 
-        else:
-            sample = input_sample.copy()
-            inference_parameters = self.parameters_dict["inference_parameters"]
+        # =========================================================
+        # INVERSE TRANSFORM
+        # =========================================================
 
-            parameters = input_sample["parameters"][:]
-            assert parameters.shape[-1] == len(inference_parameters), (
-                f"Expected {len(inference_parameters)} parameters "
-                f"({inference_parameters}), but got {parameters.shape[-1]}."
+        sample = input_sample.copy()
+
+        inference_parameters = self.parameters_dict[
+            "inference_parameters"
+        ]
+
+        parameters = input_sample["parameters"][:]
+
+        assert parameters.shape[-1] == len(inference_parameters), (
+            f"Expected {len(inference_parameters)} parameters "
+            f"({inference_parameters}), "
+            f"but got {parameters.shape[-1]}."
+        )
+
+        # ---------------------------------------------------------
+        # De-standardize parameters.
+        # ---------------------------------------------------------
+        for idx, par in enumerate(inference_parameters):
+
+            parameters[..., idx] = (
+                parameters[..., idx]
+                * self.std[par]
+                + self.mean[par]
             )
 
-            # de-normalize parameters
+        # ---------------------------------------------------------
+        # Repackage output.
+        # ---------------------------------------------------------
+        if as_type is None:
+
+            sample["parameters"] = parameters
+
+        elif as_type == "dict":
+
+            sample["parameters"] = {}
+
             for idx, par in enumerate(inference_parameters):
-                parameters[..., idx] = (
-                    parameters[..., idx] * self.std[par] + self.mean[par]
+
+                sample["parameters"][par] = parameters[..., idx]
+
+        elif as_type == "pandas":
+
+            sample["parameters"] = pd.DataFrame(
+                np.array(parameters),
+                columns=inference_parameters,
+            )
+
+        else:
+
+            raise NotImplementedError(
+                f"Unexpected type {as_type}, "
+                f"expected one of [None, pandas, dict]."
+            )
+
+        # ---------------------------------------------------------
+        # Transform log probability according to the
+        # change-of-variables rule.
+        # ---------------------------------------------------------
+        if "log_prob" in sample:
+
+            log_std = np.sum(
+                np.log(
+                    [
+                        self.std[p]
+                        for p in inference_parameters
+                    ]
                 )
+            )
 
-            # TODO: Can we remove the as_type option? Do we ever want anything other
-            #  than a dict?
-            # return normalized parameters as desired type
-            if self.as_type is None:
-                sample["parameters"] = parameters
-
-            elif self.as_type == "dict":
-                sample["parameters"] = {}
-                for idx, par in enumerate(inference_parameters):
-                    sample["parameters"][par] = parameters[..., idx]
-
-            elif self.as_type == "pandas":
-                sample["parameters"] = pd.DataFrame(
-                    np.array(parameters), columns=inference_parameters
-                )
-
-            else:
-                raise NotImplementedError(
-                    f"Unexpected type {self.as_type}, "
-                    f"expected one of [None, pandas, dict]."
-                )
-
-            # TODO: Implement this for the forward map, if needed.
-            if "log_prob" in sample:
-                log_std = np.sum(np.log([self.std[p] for p in inference_parameters]))
-                sample["log_prob"] -= log_std
+            sample["log_prob"] -= log_std
 
         return sample
 

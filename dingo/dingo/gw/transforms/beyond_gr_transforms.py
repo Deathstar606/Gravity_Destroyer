@@ -66,66 +66,13 @@ class SampleBeyondGRProxy(object):
         
         return sample
 
-#===========================FOR TRAINING===============================#
-""" class OnlineBeyondGRRotation(object):
-    def __init__(self, domain):
-        self.domain = domain
-
-    def __call__(self, input_sample):
-        sample = input_sample.copy()
-        
-        if "h_plus" not in sample["waveform"]:
-            raise ValueError("OnlineBeyondGRRotation expects polarizations 'h_plus' and 'h_cross'.")
-            
-        beta_proxy = sample["extrinsic_parameters"]["beta_proxy"]
-        
-        if "extrinsic_parameters" in sample and "chirp_mass" in sample["extrinsic_parameters"]:
-            chirp_mass = sample["extrinsic_parameters"]["chirp_mass"]
-        else:
-            chirp_mass = sample["parameters"]["chirp_mass"]
-            
-        freqs = self.domain.sample_frequencies
-        
-        batched, batch_size = get_batch_size_of_input_sample(input_sample)
-        if batched:
-            for i in range(batch_size):
-                bp = beta_proxy[i]
-                cm = chirp_mass[i]
-                # To undo injected phase, we use coupling_parameter = -beta_proxy
-                phase_factor = compute_beyond_gr_phase_factor(freqs, cm, -bp, -3.0)
-                
-                sample["waveform"]["h_plus"][i] *= phase_factor
-                sample["waveform"]["h_cross"][i] *= phase_factor
-        else:
-            phase_factor = compute_beyond_gr_phase_factor(freqs, chirp_mass, -beta_proxy, -3.0)
-            sample["waveform"]["h_plus"] *= phase_factor
-            sample["waveform"]["h_cross"] *= phase_factor
-
-        return sample """
-
-#===========================FOR INFERENCE===============================#
+#===========================ONLINE BEYOND-GR ROTATION===============================#
 class OnlineBeyondGRRotation(object):
     """
-    Applies the Beyond-GR proxy phase rotation directly to raw detector
-    frequency-domain strain during inference.
-
-    The phase factor is constructed on the SAME frequency grid as the
-    incoming detector strain.
-
-    This transform must run before whitening, repackaging, and tokenization.
-
-    Parameters
-    ----------
-    domain : Domain
-        Dingo domain object (used only for attribute lookup; actual freq grid
-        is derived from the incoming waveform shape).
-    chirp_mass : float
-        Chirp mass in solar masses used for the phase rotation.  Must be set
-        to the posterior median from the original Dingo-T1 run — no default.
-    pn_exponent : float
-        Post-Newtonian exponent (default -3.0).
+    Applies the Beyond-GR proxy phase rotation to either:
+    1) Raw unwhitened polarizations ('h_plus', 'h_cross') during dataset generation / training.
+    2) Raw detector frequency-domain strains ({'H1': ..., 'L1': ...}) during inference.
     """
-
     def __init__(
         self,
         domain,
@@ -142,64 +89,77 @@ class OnlineBeyondGRRotation(object):
             return float(self._chirp_mass())
         if self._chirp_mass is not None:
             return float(self._chirp_mass)
-        raise ValueError(
-            "OnlineBeyondGRRotation requires a valid chirp_mass. "
-            "Pass the Dingo-T1 posterior median via BeyondGRSampler."
-        )
+        return None
 
     @chirp_mass.setter
     def chirp_mass(self, value):
         self._chirp_mass = value
 
-
     def __call__(self, input_sample):
         sample = input_sample.copy()
 
-        # ---------------------------------------------------------
-        # Retrieve beta proxy from extrinsic_parameters
-        # ---------------------------------------------------------
+        if "extrinsic_parameters" not in sample or "beta_proxy" not in sample["extrinsic_parameters"]:
+            raise KeyError("OnlineBeyondGRRotation expects 'beta_proxy' in sample['extrinsic_parameters'].")
+
         beta_proxy = sample["extrinsic_parameters"]["beta_proxy"]
 
-        # Concise diagnostic — verifies the actual value reaching this transform
+        # Case 1: Training mode (polarizations h_plus and h_cross present)
+        if "h_plus" in sample["waveform"]:
+            if "extrinsic_parameters" in sample and "chirp_mass" in sample["extrinsic_parameters"]:
+                cm = sample["extrinsic_parameters"]["chirp_mass"]
+            elif "parameters" in sample and "chirp_mass" in sample["parameters"]:
+                cm = sample["parameters"]["chirp_mass"]
+            elif self.chirp_mass is not None:
+                cm = self.chirp_mass
+            else:
+                raise ValueError("OnlineBeyondGRRotation requires chirp_mass in sample parameters or transform initialization.")
+
+            freqs = self.domain.sample_frequencies
+            batched, batch_size = get_batch_size_of_input_sample(input_sample)
+            if batched:
+                for i in range(batch_size):
+                    bp_i = beta_proxy[i]
+                    cm_i = cm[i] if hasattr(cm, "__getitem__") else cm
+                    phase_factor = compute_beyond_gr_phase_factor(freqs, cm_i, -bp_i, self.pn_exponent)
+                    sample["waveform"]["h_plus"][i] *= phase_factor
+                    sample["waveform"]["h_cross"][i] *= phase_factor
+            else:
+                phase_factor = compute_beyond_gr_phase_factor(freqs, cm, -beta_proxy, self.pn_exponent)
+                sample["waveform"]["h_plus"] *= phase_factor
+                sample["waveform"]["h_cross"] *= phase_factor
+            return sample
+
+        # Case 2: Inference mode (detector strains by IFO)
+        cm = self.chirp_mass
+        if cm is None:
+            if "parameters" in sample and "chirp_mass" in sample["parameters"]:
+                cm = sample["parameters"]["chirp_mass"]
+            else:
+                raise ValueError("OnlineBeyondGRRotation requires chirp_mass for detector strain rotation in inference mode.")
+
         print(
             f"[OnlineBeyondGRRotation] beta_proxy={beta_proxy:+.4f}  "
-            f"chirp_mass={self.chirp_mass:.4f} M_sun"
+            f"chirp_mass={cm:.4f} M_sun"
         )
 
-        # ---------------------------------------------------------
-        # Rotate every detector strain
-        # ---------------------------------------------------------
         for ifo, waveform in sample["waveform"].items():
-
             waveform = np.asarray(waveform)
-
             num_bins = waveform.shape[-1]
             delta_f_event = 0.125
-
-            frequencies = (
-                np.arange(num_bins, dtype=np.float64)
-                * delta_f_event
-            )
+            frequencies = np.arange(num_bins, dtype=np.float64) * delta_f_event
 
             if len(frequencies) != waveform.shape[-1]:
                 raise RuntimeError(
-                    f"Frequency grid length {len(frequencies)} does not match "
-                    f"waveform length {waveform.shape[-1]}."
+                    f"Frequency grid length {len(frequencies)} does not match waveform length {waveform.shape[-1]}."
                 )
 
-            # -----------------------------------------------------
-            # Build phase factor on the RAW EVENT frequency grid
-            # -----------------------------------------------------
             phase_factor = compute_beyond_gr_phase_factor(
                 frequency_array=frequencies,
-                mass_value_solar_masses=self.chirp_mass,
+                mass_value_solar_masses=cm,
                 coupling_parameter=-beta_proxy,
                 pn_exponent=self.pn_exponent,
             )
-
-            # -----------------------------------------------------
-            # Apply phase rotation
-            # -----------------------------------------------------
             sample["waveform"][ifo] = waveform * phase_factor
 
-        return sample
+        return sample
+

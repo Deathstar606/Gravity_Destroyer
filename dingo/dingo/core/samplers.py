@@ -148,10 +148,10 @@ class Sampler(object):
         num_samples: int,
         context: Optional[dict] = None,
     ) -> dict:
-        print(
+        """ print(
             f"\n[_run_sampler begeining run sampler 2️⃣] id={id(context)} "
             f"proxy={context.get('extrinsic_parameters', {}).get('beta_proxy')}"
-        )
+        ) """
 
         if not self.unconditional_model:
             if context is None:
@@ -247,7 +247,7 @@ class Sampler(object):
             # DEBUG: RAW FLOW OUTPUT
             # =====================================================
 
-            print("\n========== RAW FLOW OUTPUT 💥 ==========")
+            """ print("\n========== RAW FLOW OUTPUT 💥 ==========")
             print("y shape:", y.shape)
             print("y dtype:", y.dtype)
 
@@ -270,7 +270,7 @@ class Sampler(object):
                     f"mean={y[..., 1].mean().item():.6f}"
                 )
 
-            print("========================================")
+            print("========================================") """
 
 
             # =====================================================
@@ -288,7 +288,7 @@ class Sampler(object):
             # transform_post.
             # =====================================================
 
-            if y.ndim >= 2 and y.shape[-1] == 2:
+            """ if y.ndim >= 2 and y.shape[-1] == 2:
 
                 print("\n========== INVERSE STANDARDIZATION TEST ==========")
 
@@ -372,7 +372,7 @@ class Sampler(object):
                     chirp_difference,
                 )
 
-                print("===================================================")
+                print("===================================================") """
 
         if not self.unconditional_model:
             # Squeeze the batch dimension added earlier
@@ -383,7 +383,7 @@ class Sampler(object):
         # ============================================================
         # DEBUG: IDENTIFY ACTUAL FLOW PARAMETER KEYS
         # ============================================================
-        print("\n========== FLOW OUTPUT PARAMETER DEBUG ==========")
+        """ print("\n========== FLOW OUTPUT PARAMETER DEBUG ==========")
 
         print("Sampler class:", type(self).__name__)
         print("transform_post type:", type(self.transform_post).__name__)
@@ -437,7 +437,7 @@ class Sampler(object):
                     f"mean={y[..., idx].mean().item():.6f}"
                 )
 
-        print("================================================\n")
+        print("================================================\n") """
 
         samples = self.transform_post(
             {
@@ -452,7 +452,7 @@ class Sampler(object):
         # ============================================================
         # DEBUG: ACTUAL POST-TRANSFORM OUTPUT KEYS
         # ============================================================
-        print("\n========== POST-TRANSFORM PARAMETER DEBUG ==========")
+        """ print("\n========== POST-TRANSFORM PARAMETER DEBUG ==========")
 
         print("result type:", type(result))
 
@@ -471,7 +471,7 @@ class Sampler(object):
             except Exception as e:
                 print(f"{key}: unable to calculate statistics: {e}")
 
-        print("====================================================\n")
+        print("====================================================\n") """
 
         return result
 

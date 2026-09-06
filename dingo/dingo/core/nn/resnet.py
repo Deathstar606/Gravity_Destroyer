@@ -91,7 +91,7 @@ class DenseResidualNet(nn.Module):
         dropout: float = 0.0,
         batch_norm: bool = True,
         layer_norm: bool = False,
-        context_in_initial_layer: bool = False,
+        context_in_initial_layer: bool = True,
     ):
         """
         Parameters

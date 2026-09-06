@@ -48,6 +48,7 @@ def create_base_transform(
     tail_bound: float = 1.0,
     apply_unconditional_transform: bool = False,
     base_transform_type: str = "rq-coupling",
+    context_in_initial_layer: bool = False,
 ):
     """
     Build a base NSF transform of y, conditioned on x.
@@ -93,6 +94,8 @@ def create_base_transform(
         whether to apply an unconditional transform to fixed components
     :param base_transform_type: str = 'rq-coupling'
         type of base transform, one of {rq-coupling, rq-autoregressive}
+    :param context_in_initial_layer: bool = False
+        whether to concatenate the context features to the input of the initial layer or not.
 
     :return: Transform
         the NSF transform
@@ -110,7 +113,7 @@ def create_base_transform(
         # If possible (no layer norm), use the nflows version of the ResidualNet. This
         # is for backwards compatibility, since our DenseResidualNet has different
         # sub-nn.Modules.
-        if layer_norm:
+        if layer_norm or context_in_initial_layer:
             transform_net_create_fn = (
                 lambda in_features, out_features: DenseResidualNet(
                     input_dim=in_features,
@@ -121,6 +124,7 @@ def create_base_transform(
                     dropout=dropout_probability,
                     batch_norm=batch_norm,
                     layer_norm=layer_norm,
+                    context_in_initial_layer=context_in_initial_layer,
                 )
             )
         else:
@@ -180,6 +184,7 @@ def create_base_transform(
                     dropout=dropout_probability,
                     batch_norm=batch_norm,
                     layer_norm=layer_norm,
+                    context_in_initial_layer=context_in_initial_layer,
                 )
             ),
             unconditional_transform=None,
@@ -387,10 +392,16 @@ def create_nsf_with_embedding_net(
 
     embedding_net = embedding_net_builder(**embedding_kwargs)
     posterior_kwargs_nbrg = copy.deepcopy(posterior_kwargs)
-    posterior_kwargs_nbrg.pop("beyond_gr", None)
-    flow = create_nsf_model(**posterior_kwargs_nbrg) #the configuration of the flow (2nd print shows actual)
+    beyond_gr = posterior_kwargs_nbrg.pop("beyond_gr", False) or embedding_kwargs.get("beyond_gr", False)
+
+    if beyond_gr:
+        if "base_transform_kwargs" in posterior_kwargs_nbrg:
+            if "context_in_initial_layer" not in posterior_kwargs_nbrg["base_transform_kwargs"]:
+                posterior_kwargs_nbrg["base_transform_kwargs"]["context_in_initial_layer"] = True
+
+    flow = create_nsf_model(**posterior_kwargs_nbrg)
     
-    if posterior_kwargs.get("beyond_gr", False) or embedding_kwargs.get("beyond_gr", False):
+    if beyond_gr:
         try:
             from dingo.gw.beyond_gr.beyond_gr_flow_wrapper import BeyondGRFlowWrapper
             model = BeyondGRFlowWrapper(flow, embedding_net)

@@ -49,8 +49,8 @@ data:
         max_width: 10.
 
 model:
-  #beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/dingo_t1.pt
-  beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_stage_0.pt
+  beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/dingo_t1.pt
+  #beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_stage_0.pt
   posterior_model_type: normalizing_flow
   posterior_kwargs:
     beyond_gr: True
@@ -58,7 +58,7 @@ model:
     #context_dim: 134
     num_flow_steps: 10 # Reduced from 30 for memory efficiency
     base_transform_kwargs:
-      hidden_dim: 256 # Reduced from 512 #🧧
+      hidden_dim: 512
       num_transform_blocks: 2 #🧧
       activation: elu
       batch_norm: False
@@ -66,6 +66,7 @@ model:
       dropout_probability: 0.0
       num_bins: 8
       base_transform_type: rq-coupling
+      context_in_initial_layer: True
   embedding_type: transformer
   embedding_kwargs:
     tokenizer_kwargs:
@@ -92,8 +93,8 @@ training:
   stage_0:
     # Stage 0: Train only the newly initialized 2D NSF while keeping the
     # pretrained transformer frozen.
-    epochs: 4
-    freeze_all_except_last_n_layers: 2
+    epochs: 10
+    freeze_all_except_last_n_layers: 0
 
     asd_dataset_path: /home/deathstar/dingorep/dingo-T1/01_paper_settings/01_training/02_asd_dataset/asds_O3.hdf5
 

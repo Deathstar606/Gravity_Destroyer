@@ -25,6 +25,7 @@ def build_model_from_kwargs(
     pretraining: Optional[bool] = False,
     pretrained_embedding_net: Optional[torch.nn.Module] = None,
     print_output: Optional[bool] = True,
+    load_embedding_only: Optional[bool] = False,
     **kwargs,
 ) -> BasePosteriorModel:
     """
@@ -46,6 +47,8 @@ def build_model_from_kwargs(
         pretrained embedding network
     print_output: bool = True
         Whether to write print messages to the console.
+    load_embedding_only: bool = False
+        Whether to load only embedding weights from checkpoint and skip flow.* keys
     kwargs
         Arguments forwarded to the model constructor.
 

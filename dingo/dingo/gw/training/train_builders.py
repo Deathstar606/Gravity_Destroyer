@@ -38,7 +38,6 @@ from dingo.gw.transforms import (
     DropRandomTokens,
 )
 
-
 def build_dataset(
     data_settings: dict,
     leave_waveforms_on_disk: Optional[bool] = False,
@@ -156,7 +155,7 @@ def set_train_transforms( #dataset transforms for training
         SampleExtrinsicParameters(extrinsic_prior_dict),
         GetDetectorTimes(ifo_list, ref_time),
         ComputeBeyondGRParameters(),
-        SampleBeyondGRProxy(),
+        SampleBeyondGRProxy()
     ]
 
     extra_context_parameters = []

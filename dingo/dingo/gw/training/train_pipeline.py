@@ -229,12 +229,9 @@ def prepare_wfd_and_initialization_for_embedding_network(
                 filename=pretrained_model_path,
                 pretraining=False,
                 pretrained_embedding_net=None,
+                load_embedding_only=True,
                 device=local_settings["device"],
                 print_output=print_output,
-            )
-            pm.load_embedding_weights_only(
-                pretrained_model_path,
-                device=local_settings["device"],
             )
             pretrained_embedding_net = pm.network.embedding_net
     else:

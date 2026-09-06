@@ -8,6 +8,7 @@ Covers all 4 checks:
 """
 
 import sys
+import os
 sys.path.insert(0, "/home/deathstar/dingorep/dingo")
 
 import numpy as np
@@ -150,7 +151,9 @@ print("CHECK 2: OnlineBeyondGRRotation Frequency-Grid Consistency")
 print("=" * 70)
 
 # Load real model and domain
-bgr_model_path = "/home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_stage_0.pt"
+bgr_model_path = "/home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_latest.pt"
+if not os.path.exists(bgr_model_path):
+    bgr_model_path = "/home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_stage_0.pt"
 model = build_model_from_kwargs(filename=bgr_model_path, device="cpu", load_training_info=False)
 from dingo.gw.domains import build_domain_from_model_metadata
 domain = build_domain_from_model_metadata(model.metadata)

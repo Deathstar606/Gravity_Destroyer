@@ -1350,10 +1350,229 @@ class BeyondGRSampler(GWSampler):
         finally:
             self._beyond_gr_pipeline_active = False
 
+    def diagnose_proxy_waveform_and_embedding(
+        self,
+        proxies=None,
+    ):
+        """
+        Diagnostic #7/#8
+
+        Verifies whether changing beta_proxy actually changes:
+            beta_proxy
+                -> OnlineBeyondGRRotation
+                -> transformed waveform
+                -> Transformer embedding
+
+        This is diagnostic only. It does not modify sampler state.
+        """
+
+        if proxies is None:
+            proxies = self.proxies
+
+        print("\n" + "=" * 90)
+        print("DIAGNOSTIC #7/#8: PROXY -> WAVEFORM -> EMBEDDING")
+        print("=" * 90)
+
+        results = {}
+
+        # ---------------------------------------------------------
+        # Preserve the current sampler context.
+        # ---------------------------------------------------------
+        original_context = copy.deepcopy(self.context)
+
+        # We need the fixed physical conditioning parameters available.
+        base_parameters = self._build_chain_parameters()
+
+        for proxy in proxies:
+
+            context_i = copy.deepcopy(original_context)
+
+            # -----------------------------------------------------
+            # Reconstruct exactly the same context used by
+            # generate_proxy_chains().
+            # -----------------------------------------------------
+            context_i["parameters"] = copy.deepcopy(base_parameters)
+
+            context_i.setdefault("extrinsic_parameters", {})
+            context_i["extrinsic_parameters"]["beta_proxy"] = float(proxy)
+
+            # -----------------------------------------------------
+            # DO NOT use self.context setter here.
+            # We want a local context only.
+            # -----------------------------------------------------
+            x = self.transform_pre(context_i)
+
+            if isinstance(x, (list, tuple)):
+                x = [xi.unsqueeze(0) for xi in x]
+            else:
+                x = [x.unsqueeze(0)]
+
+            print("\n" + "-" * 80)
+            print(f"PROXY = {proxy:+.1f}")
+            print("-" * 80)
+
+            # -----------------------------------------------------
+            # Print exact transformed tensor ordering.
+            # -----------------------------------------------------
+            print("Number of transformed tensors:", len(x))
+
+            for idx, xi in enumerate(x):
+                print(
+                    f"x[{idx}] shape={tuple(xi.shape)}, "
+                    f"dtype={xi.dtype}, "
+                    f"device={xi.device}"
+                )
+
+            # -----------------------------------------------------
+            # IMPORTANT:
+            # Current inference order is:
+            # x[0] = waveform
+            # x[1] = context_parameters
+            # x[2] = position
+            # x[3] = drop_token_mask
+            # -----------------------------------------------------
+            waveform = x[0]
+
+            print("\nWaveform diagnostics:")
+            print("  shape :", tuple(waveform.shape))
+            print("  dtype :", waveform.dtype)
+            print("  norm  :", torch.linalg.vector_norm(waveform.float()).item())
+            print("  mean  :", waveform.float().mean().item())
+            print("  std   :", waveform.float().std().item())
+            print("  min   :", waveform.float().min().item())
+            print("  max   :", waveform.float().max().item())
+
+            # -----------------------------------------------------
+            # Transformer embedding.
+            # -----------------------------------------------------
+            self.model.network.eval()
+
+            with torch.no_grad():
+                context_vector, logging_info = self.model.network._get_context(*x)
+
+            embedding = context_vector[:, :128].float()
+            context_parameters = context_vector[:, 128:134].float()
+
+            print("\nEmbedding diagnostics:")
+            print("  embedding shape :", tuple(embedding.shape))
+            print("  embedding norm  :", torch.linalg.vector_norm(embedding).item())
+            print("  embedding mean  :", embedding.mean().item())
+            print("  embedding std   :", embedding.std().item())
+            print("  embedding min   :", embedding.min().item())
+            print("  embedding max   :", embedding.max().item())
+
+            print("\nFinal 134D context:")
+            print("  embedding part shape :", tuple(embedding.shape))
+            print("  context part shape   :", tuple(context_parameters.shape))
+            print(
+                "  context[128:134]     :",
+                context_parameters[0].detach().cpu().numpy()
+            )
+
+            # The first context parameter MUST be beta_proxy
+            actual_proxy = context_parameters[0, 0].item()
+
+            print(
+                f"  beta_proxy expected  : {proxy:+.6f}"
+            )
+            print(
+                f"  beta_proxy received  : {actual_proxy:+.6f}"
+            )
+
+            results[proxy] = {
+                "waveform": waveform.detach().float().cpu().clone(),
+                "embedding": embedding.detach().cpu().clone(),
+                "context_vector": context_vector.detach().float().cpu().clone(),
+                "waveform_norm": torch.linalg.vector_norm(
+                    waveform.float()
+                ).item(),
+                "embedding_norm": torch.linalg.vector_norm(
+                    embedding
+                ).item(),
+            }
+
+        # ---------------------------------------------------------
+        # Pairwise comparison against proxy = -4
+        # ---------------------------------------------------------
+        reference_proxy = proxies[0]
+
+        reference_waveform = results[reference_proxy]["waveform"]
+        reference_embedding = results[reference_proxy]["embedding"]
+
+        print("\n" + "=" * 90)
+        print(
+            f"PAIRWISE DIFFERENCES RELATIVE TO PROXY {reference_proxy:+.1f}"
+        )
+        print("=" * 90)
+
+        reference_waveform_norm = torch.linalg.vector_norm(
+            reference_waveform
+        ).item()
+
+        reference_embedding_norm = torch.linalg.vector_norm(
+            reference_embedding
+        ).item()
+
+        for proxy in proxies[1:]:
+
+            current_waveform = results[proxy]["waveform"]
+            current_embedding = results[proxy]["embedding"]
+
+            waveform_delta = torch.linalg.vector_norm(
+                current_waveform - reference_waveform
+            ).item()
+
+            embedding_delta = torch.linalg.vector_norm(
+                current_embedding - reference_embedding
+            ).item()
+
+            relative_waveform_delta = waveform_delta / (
+                reference_waveform_norm + 1e-12
+            )
+
+            relative_embedding_delta = embedding_delta / (
+                reference_embedding_norm + 1e-12
+            )
+
+            cosine_similarity = torch.nn.functional.cosine_similarity(
+                reference_embedding,
+                current_embedding,
+                dim=-1,
+            ).item()
+
+            print(
+                f"\n{reference_proxy:+.1f} -> {proxy:+.1f}"
+            )
+            print(
+                f"  waveform Δ          = {waveform_delta:.6e}"
+            )
+            print(
+                f"  waveform relative Δ = {relative_waveform_delta:.6e}"
+            )
+            print(
+                f"  embedding Δ         = {embedding_delta:.6e}"
+            )
+            print(
+                f"  embedding relative Δ= {relative_embedding_delta:.6e}"
+            )
+            print(
+                f"  embedding cosine    = {cosine_similarity:.10f}"
+            )
+
+        # ---------------------------------------------------------
+        # Restore original sampler context.
+        # ---------------------------------------------------------
+        self.context = original_context
+
+        print("\n" + "=" * 90)
+        print("END DIAGNOSTIC #7/#8")
+        print("=" * 90)
+
+        return results
+
     # ------------------------------------------------------------------ #
     # Proxy-chain generation                                              #
     # ------------------------------------------------------------------ #
-
     def generate_proxy_chains(self, num_samples: int, batch_size: int = None):
         """
         Generate posterior samples for each of the five beta_proxy chains.
@@ -1417,6 +1636,141 @@ class BeyondGRSampler(GWSampler):
         self.context = base_context
         return chains
 
+    def diagnose_pre_gibbs_posteriors(self, chains):
+        """
+        Diagnostic #9
+
+        Inspect the raw 2D flow output BEFORE Gibbs refinement.
+
+        For each beta_proxy chain:
+            beta_residual
+            chirp_mass
+            log_prob
+
+        are summarized independently.
+        """
+
+        print("\n" + "=" * 90)
+        print("DIAGNOSTIC #9: PRE-GIBBS 2D POSTERIOR")
+        print("=" * 90)
+
+        summary = {}
+
+        for proxy, samples_dict in chains.items():
+
+            beta_residual = np.asarray(
+                samples_dict["beta_residual"],
+                dtype=np.float64,
+            )
+
+            chirp_mass = np.asarray(
+                samples_dict["chirp_mass"],
+                dtype=np.float64,
+            )
+
+            log_prob = np.asarray(
+                samples_dict["log_prob"],
+                dtype=np.float64,
+            )
+
+            print("\n" + "-" * 80)
+            print(f"PROXY = {proxy:+.1f}")
+            print("-" * 80)
+
+            print(f"N samples = {len(beta_residual)}")
+
+            # -----------------------------------------------------
+            # beta_residual statistics
+            # -----------------------------------------------------
+            beta_outside = (
+                (beta_residual < -1.0)
+                |
+                (beta_residual > 1.0)
+            )
+
+            print("\nβ_residual statistics:")
+            print(f"  min       = {np.min(beta_residual): .8f}")
+            print(f"  max       = {np.max(beta_residual): .8f}")
+            print(f"  mean      = {np.mean(beta_residual): .8f}")
+            print(f"  median    = {np.median(beta_residual): .8f}")
+            print(f"  std       = {np.std(beta_residual): .8f}")
+            print(
+                "  outside [-1,1] = "
+                f"{np.sum(beta_outside)}/{len(beta_residual)} "
+                f"({100.0 * np.mean(beta_outside):.4f}%)"
+            )
+
+            # -----------------------------------------------------
+            # Chirp mass statistics
+            # -----------------------------------------------------
+            chirp_negative = chirp_mass < 0.0
+
+            print("\nChirp-mass statistics:")
+            print(f"  min       = {np.min(chirp_mass): .8f}")
+            print(f"  max       = {np.max(chirp_mass): .8f}")
+            print(f"  mean      = {np.mean(chirp_mass): .8f}")
+            print(f"  median    = {np.median(chirp_mass): .8f}")
+            print(f"  std       = {np.std(chirp_mass): .8f}")
+            print(
+                "  negative = "
+                f"{np.sum(chirp_negative)}/{len(chirp_mass)} "
+                f"({100.0 * np.mean(chirp_negative):.4f}%)"
+            )
+
+            # -----------------------------------------------------
+            # log_prob statistics
+            # -----------------------------------------------------
+            print("\nFlow log_prob statistics:")
+            print(f"  min       = {np.min(log_prob): .8f}")
+            print(f"  max       = {np.max(log_prob): .8f}")
+            print(f"  mean      = {np.mean(log_prob): .8f}")
+            print(f"  median    = {np.median(log_prob): .8f}")
+            print(
+                f"  p95       = {np.percentile(log_prob, 95): .8f}"
+            )
+
+            summary[proxy] = {
+                "beta_mean": np.mean(beta_residual),
+                "beta_std": np.std(beta_residual),
+                "beta_median": np.median(beta_residual),
+                "beta_min": np.min(beta_residual),
+                "beta_max": np.max(beta_residual),
+                "beta_outside_fraction": np.mean(beta_outside),
+                "chirp_mean": np.mean(chirp_mass),
+                "chirp_std": np.std(chirp_mass),
+                "chirp_median": np.median(chirp_mass),
+                "chirp_min": np.min(chirp_mass),
+                "chirp_max": np.max(chirp_mass),
+                "chirp_negative_fraction": np.mean(chirp_negative),
+                "log_prob_mean": np.mean(log_prob),
+                "log_prob_median": np.median(log_prob),
+                "log_prob_max": np.max(log_prob),
+            }
+
+        # ---------------------------------------------------------
+        # Compare the five proxy-conditioned posteriors
+        # ---------------------------------------------------------
+        print("\n" + "=" * 90)
+        print("CROSS-PROXY POSTERIOR COMPARISON")
+        print("=" * 90)
+
+        for proxy, stats in summary.items():
+
+            print(
+                f"proxy={proxy:+.1f} | "
+                f"βres mean={stats['beta_mean']:+.6f}, "
+                f"std={stats['beta_std']:.6f} | "
+                f"CM mean={stats['chirp_mean']:.6f}, "
+                f"std={stats['chirp_std']:.6f} | "
+                f"logP median={stats['log_prob_median']:.6f}"
+            )
+
+        print("\n" + "=" * 90)
+        print("END DIAGNOSTIC #9")
+        print("=" * 90)
+
+        return summary
+
     # ------------------------------------------------------------------ #
     # Chain-survival test                                                 #
     # ------------------------------------------------------------------ #
@@ -1465,8 +1819,96 @@ class BeyondGRSampler(GWSampler):
             self.model.network.eval()
             with torch.no_grad():
                 context_vector, _ = self.model.network._get_context(*x)
+                # =========================================================
+                # DEBUG: verify final context actually contains this proxy
+                # =========================================================
+
+                final_context_params = (
+                    context_vector[0, 128:134]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                print(
+                    f"[SURVIVAL CONTEXT] proxy={proxy:+.1f}"
+                )
+
+                print(
+                    "  context[128:134] =",
+                    final_context_params
+                )
+
+                print(
+                    "  beta_proxy_context_value =",
+                    final_context_params[0]
+                )
                 context_vector_expanded = context_vector.expand(
                     len(samples_tensor), -1
+                )
+                # =========================================================
+                # DEBUG: Is the flow actually sensitive to beta_proxy?
+                # =========================================================
+
+                context_probe = context_vector[:1].clone()
+
+                beta_context_index = 128
+
+                original_beta_context = context_probe[0, beta_context_index].item()
+
+                # Small perturbation in standardized beta_proxy space.
+                context_probe[0, beta_context_index] = (
+                    original_beta_context + 0.1
+                )
+
+                context_probe_expanded = context_probe.expand(
+                    len(samples_tensor), -1
+                )
+
+                with torch.no_grad():
+
+                    flow_output_original, _ = self.model.network.flow._transform(
+                        samples_tensor,
+                        context_vector_expanded
+                    )
+
+                    flow_output_perturbed, _ = self.model.network.flow._transform(
+                        samples_tensor,
+                        context_probe_expanded
+                    )
+
+                flow_delta = (
+                    flow_output_perturbed.float()
+                    - flow_output_original.float()
+                )
+
+                print(
+                    f"[FLOW CONTEXT SENSITIVITY] proxy={proxy:+.1f}"
+                )
+
+                print(
+                    "  beta_proxy context value:",
+                    original_beta_context
+                )
+
+                print(
+                    "  perturbation:",
+                    0.1
+                )
+
+                print(
+                    "  transformed-output Δ norm:",
+                    torch.linalg.vector_norm(flow_delta).item()
+                )
+
+                print(
+                    "  transformed-output Δ mean:",
+                    flow_delta.abs().mean().item()
+                )
+
+                print(
+                    "  transformed-output Δ max:",
+                    flow_delta.abs().max().item()
                 )
                 _, logabsdet = self.model.network.flow._transform(
                     samples_tensor, context_vector_expanded
@@ -1474,7 +1916,55 @@ class BeyondGRSampler(GWSampler):
 
             logabsdet_np = logabsdet.cpu().numpy()
             log_prob_np = samples_dict["log_prob"]
+            # =========================================================
+            # DEBUG: detailed Jacobian + log-probability diagnostics
+            # =========================================================
 
+            print("\n" + "-" * 80)
+            print(f"CHAIN DIAGNOSTIC: proxy={proxy:+.1f}")
+            print("-" * 80)
+
+            print(
+                "logabsdet:"
+                f" mean={np.mean(logabsdet_np):.8f},"
+                f" median={np.median(logabsdet_np):.8f},"
+                f" std={np.std(logabsdet_np):.8f},"
+                f" min={np.min(logabsdet_np):.8f},"
+                f" max={np.max(logabsdet_np):.8f},"
+                f" p05={np.percentile(logabsdet_np, 5):.8f},"
+                f" p95={np.percentile(logabsdet_np, 95):.8f}"
+            )
+
+            print(
+                "log_prob:"
+                f" mean={np.mean(log_prob_np):.8f},"
+                f" median={np.median(log_prob_np):.8f},"
+                f" std={np.std(log_prob_np):.8f},"
+                f" min={np.min(log_prob_np):.8f},"
+                f" max={np.max(log_prob_np):.8f},"
+                f" p05={np.percentile(log_prob_np, 5):.8f},"
+                f" p95={np.percentile(log_prob_np, 95):.8f}"
+            )
+
+            print(
+                "fraction |logabsdet| < 1e-3 =",
+                np.mean(np.abs(logabsdet_np) < 1e-3)
+            )
+
+            print(
+                "fraction |logabsdet| < 1e-2 =",
+                np.mean(np.abs(logabsdet_np) < 1e-2)
+            )
+
+            print(
+                "fraction |logabsdet| < 1e-1 =",
+                np.mean(np.abs(logabsdet_np) < 1e-1)
+            )
+
+            print(
+                "fraction logabsdet < 0 =",
+                np.mean(logabsdet_np < 0.0)
+            )
             mean_logabsdet = np.mean(logabsdet_np)
             is_dead = np.abs(mean_logabsdet) < detJ_threshold
 
@@ -1623,12 +2113,24 @@ class BeyondGRSampler(GWSampler):
         """
         print("Starting Beyond-GR inference pipeline")
 
-        print("Step 1-4: Generating proxy chains")
         chains = self.generate_proxy_chains(
-            num_samples=num_survival_samples, batch_size=batch_size
+            num_samples=num_survival_samples,
+            batch_size=batch_size
         )
 
-        print("Step 5-6: Evaluating chain survival")
+        # =========================================================
+        # DEBUG DIAGNOSTIC #7/#8
+        # =========================================================
+        proxy_diagnostics = self.diagnose_proxy_waveform_and_embedding()
+
+        # =========================================================
+        # DEBUG DIAGNOSTIC #9
+        # =========================================================
+        posterior_diagnostics = self.diagnose_pre_gibbs_posteriors(chains)
+
+        # =========================================================
+        # Existing chain-survival code
+        # =========================================================
         surviving_proxy, survival_stats = self.evaluate_chain_survival(chains)
 
         print("Step 7: Gibbs refinement")

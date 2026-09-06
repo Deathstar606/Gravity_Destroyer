@@ -1338,8 +1338,8 @@ class UpdateFrequencyRange(object):
                 raise TypeError(
                     f"self.minimum_frequency is type {type(self.minimum_frequency)} but must be either a float, an int or a dict."
                 )
-            if self.print_output:
-                print(f"Updated f_min with {self.minimum_frequency}.")
+            """ if self.print_output:
+                print(f"Updated f_min with {self.minimum_frequency}.") """
 
         # Update maximum_frequency
         if self.maximum_frequency is not None:
@@ -1369,8 +1369,8 @@ class UpdateFrequencyRange(object):
                 raise TypeError(
                     f"self.maximum_frequency is type {type(self.maximum_frequency)} but must be either a float, an int or a dict."
                 )
-            if self.print_output:
-                print(f"Updated f_max with {self.maximum_frequency}.")
+            """ if self.print_output:
+                print(f"Updated f_max with {self.maximum_frequency}.") """
 
         # Update suppress_range
         if self.suppress_range is not None:
@@ -1406,7 +1406,7 @@ class UpdateFrequencyRange(object):
 
         # Update drop_token_mask
         sample["drop_token_mask"] = np.logical_or(mask, sample["drop_token_mask"])
-        print("\n========== AFTER STRAIN TOKENIZATION ==========")
+        """ print("\n========== AFTER STRAIN TOKENIZATION ==========")
 
         print("sample keys:", sample.keys())
 
@@ -1443,6 +1443,6 @@ class UpdateFrequencyRange(object):
             getattr(sample.get("drop_token_mask"), "shape", None)
         )
 
-        print("===============================================\n")
+        print("===============================================\n") """
 
         return sample

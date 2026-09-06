@@ -10,6 +10,7 @@ import numpy as np
 import os
 import sys
 import time
+import copy
 
 from abc import abstractmethod, ABC
 from collections import OrderedDict
@@ -32,7 +33,6 @@ from dingo.core.utils.misc import get_version
 from dingo.core.utils.scheduler import get_scheduler_from_kwargs, perform_scheduler_step
 from dingo.core.utils.trainutils import EarlyStopping, RuntimeLimits
 
-
 class BasePosteriorModel(ABC):
     """
     Abstract base class for PosteriorModels. This is intended to construct and hold a
@@ -51,6 +51,7 @@ class BasePosteriorModel(ABC):
         initial_weights: dict = None,
         device: str = None,
         load_training_info: bool = True,
+        load_embedding_only: bool = False,
     ):
         """
         Initialize a model for the posterior distribution.
@@ -67,6 +68,9 @@ class BasePosteriorModel(ABC):
             Initial weights for the model
         device: str
         load_training_info: bool
+        load_embedding_only: bool
+            If True, only embedding network weights are loaded from checkpoint,
+            and flow.* parameters are skipped.
         """
 
         self.version = f"dingo={get_version()}"  # dingo version
@@ -106,7 +110,10 @@ class BasePosteriorModel(ABC):
         # build model
         if model_filename is not None:
             self.load_model(
-                model_filename, load_training_info=load_training_info, device=device
+                model_filename,
+                load_training_info=load_training_info,
+                device=device,
+                load_embedding_only=load_embedding_only,
             )
         else:
             self.initialize_network()
@@ -210,10 +217,25 @@ class BasePosteriorModel(ABC):
         """
         pass
 
+    # =========================================================================
+    # Context management
+    # =========================================================================
+
+    def set_context(self, context: dict, event_metadata: dict = None):
+        """
+        Set context data and metadata for the posterior model.
+        """
+        self.context = context
+        self.event_metadata = event_metadata
+
     def network_to_device(self, device):
         """
         Put model to device, and set self.device accordingly.
         """
+        if device == "meta":
+            self.device = "meta"
+            return
+
         # 1. Cast to string immediately to support both str and torch.device inputs safely
         device_str = str(device)
         
@@ -240,17 +262,17 @@ class BasePosteriorModel(ABC):
         """
         if self.optimizer_kwargs is not None:
             self.optimizer = utils.get_optimizer_from_kwargs(
-                self.network.parameters(), **self.optimizer_kwargs #{'type': 'adamw', 'lr': 0.0001, 'betas': [0.8, 0.99], 'weight_decay': 0.005}
+                self.network.parameters(), **self.optimizer_kwargs
             )
         if self.scheduler_kwargs is not None:
             # Number of optimizer steps per epoch required if scheduler updates are performed per optimizer step
             if num_optimizer_steps is not None:
                 self.scheduler_kwargs["num_optimizer_steps_per_epoch"] = (
-                    num_optimizer_steps #78
+                    num_optimizer_steps
                 )
 
             self.scheduler = get_scheduler_from_kwargs(
-                self.optimizer, **self.scheduler_kwargs #{'type': 'cosine'}
+                self.optimizer, **self.scheduler_kwargs
             )
 
     def save_model(
@@ -275,6 +297,7 @@ class BasePosteriorModel(ABC):
             "epoch": self.epoch,
             "iteration": self.iteration,
             "version": self.version,
+            "logging_info": self.logging_info,
         }
 
         # Remove DDP wrapper
@@ -348,6 +371,7 @@ class BasePosteriorModel(ABC):
         model_filename: str,
         load_training_info: bool = True,
         device: str = "xpu",
+        load_embedding_only: bool = False,
     ):
         """
         Load a posterior model from the disk.
@@ -356,15 +380,14 @@ class BasePosteriorModel(ABC):
         ----------
         model_filename: str
             path to saved model
-        load_training_info: bool #TODO: load information for training
+        load_training_info: bool
             specifies whether information required to proceed with training is
             loaded, e.g. optimizer state dict
         device: str
+        load_embedding_only: bool
+            if True, loads only embedding network weights and skips flow.* parameters
         """
 
-        # Make sure that when the model is loaded, the torch tensors are put on the
-        # device indicated in the saved metadata. External routines run on a cpu
-        # machine may have moved the model from 'cuda' to 'cpu'.
         ext = os.path.splitext(model_filename)[-1]
         if ext == ".pt":
             d = torch.load(model_filename, map_location="cpu")
@@ -375,14 +398,18 @@ class BasePosteriorModel(ABC):
 
         self.version = d.get("version")
 
-        self.model_kwargs = d["model_kwargs"]
-        update_model_config(self.model_kwargs)  # For backward compatibility
+        # If metadata is not already set from new settings, load it from checkpoint
+        if self.metadata is None:
+            self.model_kwargs = d["model_kwargs"]
+            update_model_config(self.model_kwargs)
+            self.metadata = d["metadata"]
+        else:
+            self.model_kwargs = self.metadata["train_settings"]["model"]
+            update_model_config(self.model_kwargs)
 
         self.epoch = d["epoch"]
         self.iteration = d.get("iteration", 0)
         self.logging_info = d.get("logging_info", {})
-
-        self.metadata = d["metadata"]
 
         if "context" in d:
             self.context = d["context"]
@@ -391,26 +418,81 @@ class BasePosteriorModel(ABC):
             self.event_metadata = d["event_metadata"]
 
         if device != "meta":
-            self.initialize_network()
-            self.network.load_state_dict(d["model_state_dict"])
+            if self.network is None:
+                self.initialize_network()
 
-            self.network_to_device(device)
+            is_beyond_gr = (
+                load_embedding_only
+                or self.model_kwargs.get("posterior_kwargs", {}).get("beyond_gr", False)
+                or self.model_kwargs.get("beyond_gr_checkpoint") is not None
+                or (self.metadata and "beyond_gr_checkpoint" in self.metadata.get("train_settings", {}).get("model", {}))
+            )
 
-            if load_training_info:
-                if "optimizer_kwargs" in d:
-                    self.optimizer_kwargs = d["optimizer_kwargs"]
-                if "scheduler_kwargs" in d:
-                    self.scheduler_kwargs = d["scheduler_kwargs"]
-                # initialize optimizer and scheduler
-                self.initialize_optimizer_and_scheduler()
-                # load optimizer and scheduler state dict
-                if "optimizer_state_dict" in d:
-                    self.optimizer.load_state_dict(d["optimizer_state_dict"])
-                if "scheduler_state_dict" in d:
-                    self.scheduler.load_state_dict(d["scheduler_state_dict"])
-            else:
-                # put model in evaluation mode
+            state_dict = d["model_state_dict"]
+            current_state_dict = self.network.state_dict()
+
+            if is_beyond_gr or load_embedding_only:
+                compatible_state_dict = {}
+                skipped_keys = []
+
+                for k, v in state_dict.items():
+                    # Skip all flow parameters from checkpoint
+                    if k.startswith("flow."):
+                        skipped_keys.append((k, "flow"))
+                        continue
+                    if k not in current_state_dict:
+                        skipped_keys.append((k, "missing_in_current_model"))
+                        continue
+                    if v.shape != current_state_dict[k].shape:
+                        skipped_keys.append(
+                            (
+                                k,
+                                f"shape mismatch: checkpoint={tuple(v.shape)}, "
+                                f"current={tuple(current_state_dict[k].shape)}",
+                            )
+                        )
+                        continue
+                    compatible_state_dict[k] = v
+
+                self.network.load_state_dict(compatible_state_dict, strict=False)
+                self.network_to_device(device)
                 self.network.eval()
+
+                flow_initial_layers = [
+                    (name, list(param.shape))
+                    for name, param in self.network.named_parameters()
+                    if name.startswith("flow.") and "initial_layer.weight" in name
+                ]
+
+                print("\n" + "=" * 80)
+                print("DINGO CHECKPOINT LOAD (EMBEDDING-ONLY / BEYOND-GR)")
+                print("=" * 80)
+                print(f"Checkpoint total parameters   : {len(state_dict)}")
+                print(f"Loaded embedding parameters   : {len(compatible_state_dict)}")
+                print(f"Skipped parameters            : {len(skipped_keys)}")
+                flow_skipped = [item for item in skipped_keys if item[1] == "flow"]
+                print(f"Checkpoint flow.* keys skipped: {len(flow_skipped)}")
+                print(f"New flow initial layers count : {len(flow_initial_layers)}")
+                for name, shape in flow_initial_layers[:3]:
+                    print(f"  {name}: shape == {shape}")
+                print("=" * 80 + "\n")
+
+            else:
+                self.network.load_state_dict(d["model_state_dict"])
+                self.network_to_device(device)
+
+                if load_training_info:
+                    if "optimizer_kwargs" in d:
+                        self.optimizer_kwargs = d["optimizer_kwargs"]
+                    if "scheduler_kwargs" in d:
+                        self.scheduler_kwargs = d["scheduler_kwargs"]
+                    self.initialize_optimizer_and_scheduler()
+                    if "optimizer_state_dict" in d:
+                        self.optimizer.load_state_dict(d["optimizer_state_dict"])
+                    if "scheduler_state_dict" in d:
+                        self.scheduler.load_state_dict(d["scheduler_state_dict"])
+                else:
+                    self.network.eval()
 
     def load_embedding_weights_only(self, model_filename: str, device: str = "xpu"):
         """
@@ -430,21 +512,55 @@ class BasePosteriorModel(ABC):
             raise ValueError("Models should be either in .pt or .hdf5 format.")
 
         state_dict = d["model_state_dict"]
+        current_state_dict = self.network.state_dict()
 
-        """ filtered_state_dict = {}
+        compatible_state_dict = {}
         skipped_keys = []
+
         for k, v in state_dict.items():
             if k.startswith("flow."):
-                skipped_keys.append(k)
-            else:
-                filtered_state_dict[k] = v """
-        
+                skipped_keys.append((k, "flow"))
+                continue
+            if k not in current_state_dict:
+                skipped_keys.append((k, "missing_in_current_model"))
+                continue
+            if v.shape != current_state_dict[k].shape:
+                skipped_keys.append(
+                    (
+                        k,
+                        f"shape mismatch: checkpoint={tuple(v.shape)}, "
+                        f"current={tuple(current_state_dict[k].shape)}"
+                    )
+                )
+                continue
+            compatible_state_dict[k] = v
+
         if device != "meta":
-            self.initialize_network()
-            # Load with strict=False because we are skipping the flow weights and initializing a new one
-            self.network.load_state_dict(state_dict, strict=False)
+            self.network.load_state_dict(
+                compatible_state_dict,
+                strict=False,
+            )
             self.network_to_device(device)
             self.network.eval()
+
+        flow_initial_layers = [
+            (name, list(param.shape))
+            for name, param in self.network.named_parameters()
+            if name.startswith("flow.") and "initial_layer.weight" in name
+        ]
+
+        print("\n" + "=" * 80)
+        print("DINGO EMBEDDING-ONLY LOAD")
+        print("=" * 80)
+        print(f"Checkpoint parameters         : {len(state_dict)}")
+        print(f"Loaded embedding parameters   : {len(compatible_state_dict)}")
+        print(f"Skipped parameters            : {len(skipped_keys)}")
+        flow_skipped = [item for item in skipped_keys if item[1] == "flow"]
+        print(f"Checkpoint flow.* keys skipped: {len(flow_skipped)}")
+        print(f"New flow initial layers count : {len(flow_initial_layers)}")
+        for name, shape in flow_initial_layers[:3]:
+            print(f"  {name}: shape == {shape}")
+        print("=" * 80 + "\n")
 
     def train(
         self,

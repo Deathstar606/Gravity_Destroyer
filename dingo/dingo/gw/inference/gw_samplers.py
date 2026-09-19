@@ -55,6 +55,9 @@ def _is_beyond_gr_model(model) -> bool:
 
     metadata = getattr(model, "metadata", {}) or {}
     data_settings = metadata.get("train_settings", {}).get("data", {})
+    inference_parameters = data_settings.get("inference_parameters", [])
+    if "beta_true" in inference_parameters:
+        return True
     context_parameters = data_settings.get("context_parameters", [])
     if not context_parameters:
         return False
@@ -1054,7 +1057,7 @@ def check_detector_update(
                 f"Detectors {detectors} of event do not match detectors {detectors_model} from model."
             )
 
-class BeyondGRSampler(GWSampler):
+class _LegacyBeyondGRSampler(GWSampler):
     """
     Sampler for Beyond-GR inference.
 
@@ -1223,8 +1226,15 @@ class BeyondGRSampler(GWSampler):
         medians["chi1z"] = medians["a_1"] * np.cos(medians["tilt_1"])
         medians["chi2z"] = medians["a_2"] * np.cos(medians["tilt_2"])
 
+        # Derived total mass from chirp mass and mass ratio for pn_velocity = (pi * M_total * f)^(1/3)
+        from bilby.gw.conversion import chirp_mass_and_mass_ratio_to_total_mass
+        medians["total_mass"] = float(chirp_mass_and_mass_ratio_to_total_mass(
+            medians["chirp_mass"], medians["mass_ratio"]
+        ))
+
         print("[BeyondGRSampler] Dingo-T1 posterior medians extracted:")
         print(f"  chirp_mass          = {medians['chirp_mass']:.4f} M_sun")
+        print(f"  total_mass          = {medians['total_mass']:.4f} M_sun")
         print(f"  mass_ratio          = {medians['mass_ratio']:.4f}")
         print(f"  chi1z               = {medians['chi1z']:.4f}")
         print(f"  chi2z               = {medians['chi2z']:.4f}")
@@ -1284,12 +1294,12 @@ class BeyondGRSampler(GWSampler):
 
         # Insert OnlineBeyondGRRotation at position 0 so the raw
         # detector strain is rotated BEFORE whitening and tokenisation.
-        # chirp_mass is resolved lazily from the Dingo-T1 posterior median.
+        # total_mass is resolved lazily from the Dingo-T1 posterior median.
         transforms_list.insert(
             0,
             OnlineBeyondGRRotation(
                 domain=self.domain,
-                chirp_mass=lambda: self.dingo_medians["chirp_mass"],
+                total_mass=lambda: self.dingo_medians["total_mass"],
             ),
         )
 
@@ -2192,3 +2202,59 @@ class BeyondGRSampler(GWSampler):
         self.samples = final_samples_df
         print("Completed Beyond-GR Inference Pipeline Steps 1-7")
         return final_samples_df
+
+class BeyondGRSampler(GWSampler):
+    """Sampler for the beta_true-only Beyond-GR posterior model.
+
+    The model is conditioned only on the waveform embedding. Its flow target
+    is the single standardized beta_true parameter.
+    """
+
+    def __init__(self, model):
+        inference_parameters = model.metadata["train_settings"]["data"][
+            "inference_parameters"
+        ]
+        if inference_parameters != ["beta_true"]:
+            raise ValueError(
+                "BeyondGRSampler requires inference_parameters=['beta_true']."
+            )
+        if model.metadata["train_settings"]["data"].get("context_parameters", []):
+            raise ValueError(
+                "BeyondGRSampler does not support additional context parameters."
+            )
+        super().__init__(model)
+
+    def _post_process(self, samples: Union[dict, pd.DataFrame], inverse: bool = False):
+        """
+        Post-processing of Beyond-GR parameter samples.
+        Unlike standard GWSampler, this does not inject fixed parameters from
+        the BBH prior (tilt_1, tilt_2, phi_12, phi_jl) and does not perform
+        reference-time sky position corrections.
+        """
+        if inverse:
+            drop_parameters = [
+                k for k in samples.keys() if k not in self.inference_parameters
+            ]
+            if isinstance(samples, pd.DataFrame):
+                samples.drop(columns=drop_parameters, inplace=True, errors="ignore")
+            elif isinstance(samples, dict):
+                for k in drop_parameters:
+                    samples.pop(k, None)
+
+    def _run_sampler(
+        self,
+        num_samples: int,
+        context: Optional[dict] = None,
+    ) -> dict:
+        """
+        Draw num_samples from the 1D Beyond-GR posterior flow.
+        Ensures output parameter tensors are 1D arrays of length num_samples.
+        """
+        samples = super()._run_sampler(num_samples, context)
+        for k, v in samples.items():
+            if isinstance(v, torch.Tensor):
+                if v.ndim == 2 and v.shape[0] == 1:
+                    samples[k] = v.squeeze(0)
+                elif v.ndim == 2 and v.shape[1] == 1:
+                    samples[k] = v.squeeze(1)
+        return samples

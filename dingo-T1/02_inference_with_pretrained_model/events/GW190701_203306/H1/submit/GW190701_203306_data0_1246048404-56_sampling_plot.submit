@@ -1,0 +1,17 @@
+universe = vanilla
+executable = /home/deathstar/miniconda3/envs/dingorep/bin/dingo_pipe_plot
+request_memory = 32 GB
+request_disk = 5GB
+request_cpus = 1
+initialdir = /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model
+notification = Never
+requirements = 
+log = events/GW190701_203306/H1/log_data_analysis/GW190701_203306_data0_1246048404-56_sampling_plot.log
+output = events/GW190701_203306/H1/log_data_analysis/GW190701_203306_data0_1246048404-56_sampling_plot.out
+error = events/GW190701_203306/H1/log_data_analysis/GW190701_203306_data0_1246048404-56_sampling_plot.err
+priority = 0
+environment = "HDF5_USE_FILE_LOCKING=FAlSE OMP_NUM_THREADS=1 OMP_PROC_BIND=false GWDATAFIND_SERVER=https://datafind.igwn.org"
+MY.flock_local = True
+MY.DESIRED_Sites = "nogrid"
+arguments = $(ARGS)
+queue

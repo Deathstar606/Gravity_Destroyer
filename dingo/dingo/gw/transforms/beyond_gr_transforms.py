@@ -1,7 +1,7 @@
 from random import sample
-
 import numpy as np
 import torch
+from bilby.gw.conversion import chirp_mass_and_mass_ratio_to_total_mass
 from .utils import get_batch_size_of_input_sample
 from dingo.gw.beyond_gr.beyond_gr_phase import compute_beyond_gr_phase_factor
 
@@ -76,24 +76,67 @@ class OnlineBeyondGRRotation(object):
     def __init__(
         self,
         domain,
+        total_mass=None,
         chirp_mass=None,
         pn_exponent: float = -3.0,
     ):
         self.domain = domain
+        self._total_mass = total_mass
         self._chirp_mass = chirp_mass
         self.pn_exponent = pn_exponent
 
     @property
-    def chirp_mass(self) -> float:
+    def total_mass(self) -> float:
+        if callable(self._total_mass):
+            return float(self._total_mass())
+        if self._total_mass is not None:
+            return float(self._total_mass)
         if callable(self._chirp_mass):
             return float(self._chirp_mass())
         if self._chirp_mass is not None:
             return float(self._chirp_mass)
         return None
 
+    @total_mass.setter
+    def total_mass(self, value):
+        self._total_mass = value
+
+    @property
+    def chirp_mass(self) -> float:
+        return self.total_mass
+
     @chirp_mass.setter
     def chirp_mass(self, value):
         self._chirp_mass = value
+
+    def _extract_mass(self, sample):
+        """Helper to extract total_mass (or derive from chirp_mass and mass_ratio)."""
+        # 1. Look for explicit total_mass
+        if "extrinsic_parameters" in sample and "total_mass" in sample["extrinsic_parameters"]:
+            return sample["extrinsic_parameters"]["total_mass"]
+        if "parameters" in sample and "total_mass" in sample["parameters"]:
+            return sample["parameters"]["total_mass"]
+        if "parameters" in sample and "mass_1" in sample["parameters"] and "mass_2" in sample["parameters"]:
+            return sample["parameters"]["mass_1"] + sample["parameters"]["mass_2"]
+        # 2. Look for chirp_mass and mass_ratio
+        p = sample.get("extrinsic_parameters", {}) or sample.get("parameters", {})
+        if "chirp_mass" in p and "mass_ratio" in p:
+            cm = p["chirp_mass"]
+            q = p["mass_ratio"]
+            return chirp_mass_and_mass_ratio_to_total_mass(cm, q)
+        if "parameters" in sample and "chirp_mass" in sample["parameters"] and "mass_ratio" in sample["parameters"]:
+            cm = sample["parameters"]["chirp_mass"]
+            q = sample["parameters"]["mass_ratio"]
+            return chirp_mass_and_mass_ratio_to_total_mass(cm, q)
+        # 3. Fall back to initialized mass attribute
+        if self.total_mass is not None:
+            return self.total_mass
+        # 4. Fall back to chirp_mass if only chirp_mass is present
+        if "extrinsic_parameters" in sample and "chirp_mass" in sample["extrinsic_parameters"]:
+            return sample["extrinsic_parameters"]["chirp_mass"]
+        if "parameters" in sample and "chirp_mass" in sample["parameters"]:
+            return sample["parameters"]["chirp_mass"]
+        raise ValueError("OnlineBeyondGRRotation requires total_mass (or mass_1/mass_2, or chirp_mass/mass_ratio) in sample parameters or transform initialization.")
 
     def __call__(self, input_sample):
         sample = input_sample.copy()
@@ -105,41 +148,28 @@ class OnlineBeyondGRRotation(object):
 
         # Case 1: Training mode (polarizations h_plus and h_cross present)
         if "h_plus" in sample["waveform"]:
-            if "extrinsic_parameters" in sample and "chirp_mass" in sample["extrinsic_parameters"]:
-                cm = sample["extrinsic_parameters"]["chirp_mass"]
-            elif "parameters" in sample and "chirp_mass" in sample["parameters"]:
-                cm = sample["parameters"]["chirp_mass"]
-            elif self.chirp_mass is not None:
-                cm = self.chirp_mass
-            else:
-                raise ValueError("OnlineBeyondGRRotation requires chirp_mass in sample parameters or transform initialization.")
-
+            m_val = self._extract_mass(sample)
             freqs = self.domain.sample_frequencies
             batched, batch_size = get_batch_size_of_input_sample(input_sample)
             if batched:
                 for i in range(batch_size):
                     bp_i = beta_proxy[i]
-                    cm_i = cm[i] if hasattr(cm, "__getitem__") else cm
-                    phase_factor = compute_beyond_gr_phase_factor(freqs, cm_i, -bp_i, self.pn_exponent)
+                    m_i = m_val[i] if hasattr(m_val, "__getitem__") else m_val
+                    phase_factor = compute_beyond_gr_phase_factor(freqs, m_i, -bp_i, self.pn_exponent)
                     sample["waveform"]["h_plus"][i] *= phase_factor
                     sample["waveform"]["h_cross"][i] *= phase_factor
             else:
-                phase_factor = compute_beyond_gr_phase_factor(freqs, cm, -beta_proxy, self.pn_exponent)
+                phase_factor = compute_beyond_gr_phase_factor(freqs, m_val, -beta_proxy, self.pn_exponent)
                 sample["waveform"]["h_plus"] *= phase_factor
                 sample["waveform"]["h_cross"] *= phase_factor
             return sample
 
         # Case 2: Inference mode (detector strains by IFO)
-        cm = self.chirp_mass
-        if cm is None:
-            if "parameters" in sample and "chirp_mass" in sample["parameters"]:
-                cm = sample["parameters"]["chirp_mass"]
-            else:
-                raise ValueError("OnlineBeyondGRRotation requires chirp_mass for detector strain rotation in inference mode.")
+        m_val = self._extract_mass(sample)
 
         print(
             f"[OnlineBeyondGRRotation] beta_proxy={beta_proxy:+.4f}  "
-            f"chirp_mass={cm:.4f} M_sun"
+            f"mass={m_val:.4f} M_sun (total_mass)"
         )
 
         for ifo, waveform in sample["waveform"].items():
@@ -155,7 +185,7 @@ class OnlineBeyondGRRotation(object):
 
             phase_factor = compute_beyond_gr_phase_factor(
                 frequency_array=frequencies,
-                mass_value_solar_masses=cm,
+                mass_value_solar_masses=m_val,
                 coupling_parameter=-beta_proxy,
                 pn_exponent=self.pn_exponent,
             )

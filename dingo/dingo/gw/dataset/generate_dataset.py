@@ -12,6 +12,7 @@ from typing import Tuple, Dict
 from threadpoolctl import threadpool_limits
 from torchvision.transforms import Compose
 from bilby.gw.prior import BBHPriorDict
+from bilby.gw.conversion import chirp_mass_and_mass_ratio_to_total_mass
 
 from dingo.gw.dataset.waveform_dataset import WaveformDataset
 from dingo.gw.domains import build_domain
@@ -42,12 +43,21 @@ class BeyondGRWaveformGeneratorWrapper:
             
     def generate_hplus_hcross(self, parameters):
         # Extract beyond-GR parameter
-        beta0_true = parameters.pop("beta0_true", 0.0)
+        beta_true = parameters.pop("beta_true", parameters.pop("beta0_true", 0.0))
         
-        # We need chirp_mass for the u computation
-        chirp_mass = parameters.get("chirp_mass")
-        if chirp_mass is None:
-            raise ValueError("chirp_mass must be present in parameters")
+        # We need total_mass for the pn_velocity computation: (pi * M_total * f)^(1/3)
+        total_mass = parameters.get("total_mass")
+        if total_mass is None:
+            if "mass_1" in parameters and "mass_2" in parameters:
+                total_mass = float(parameters["mass_1"] + parameters["mass_2"])
+            elif "chirp_mass" in parameters and "mass_ratio" in parameters:
+                total_mass = float(chirp_mass_and_mass_ratio_to_total_mass(
+                    parameters["chirp_mass"], parameters["mass_ratio"]
+                ))
+            elif "chirp_mass" in parameters:
+                total_mass = float(parameters["chirp_mass"])
+            else:
+                raise ValueError("total_mass (or mass_1/mass_2, or chirp_mass/mass_ratio) must be present in parameters")
             
         # Temporarily remove transform to inject phase on physical waveform
         transform = self.base_generator.transform
@@ -58,13 +68,13 @@ class BeyondGRWaveformGeneratorWrapper:
             polarizations = self.base_generator.generate_hplus_hcross(parameters)
             
             # Apply phase injection
-            if beta0_true != 0.0 and not np.any(np.isnan(polarizations["h_plus"])):
+            if beta_true != 0.0 and not np.any(np.isnan(polarizations["h_plus"])):
                 polarizations = inject_phase(
                     polarizations=polarizations,
                     frequency_array=self.base_generator.domain(),
-                    coupling_parameter=beta0_true,
+                    coupling_parameter=beta_true,
                     pn_exponent=-3.0,
-                    mass_definition=chirp_mass
+                    mass_definition=total_mass
                 )
                 
             # Re-apply transform
@@ -73,7 +83,8 @@ class BeyondGRWaveformGeneratorWrapper:
         finally:
             self.base_generator.transform = transform
             
-        parameters["beta0_true"] = beta0_true
+        parameters["beta_true"] = beta_true
+        parameters["beta0_true"] = beta_true
         return polarizations
 
 def generate_parameters_and_polarizations(
@@ -108,6 +119,7 @@ def generate_parameters_and_polarizations(
     if num_bgr > 0:
         beta0_true[:num_bgr] = np.random.uniform(-5.0, 5.0, size=num_bgr)
     
+    parameters["beta_true"] = beta0_true
     parameters["beta0_true"] = beta0_true
 
 

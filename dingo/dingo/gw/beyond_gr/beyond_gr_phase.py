@@ -11,8 +11,8 @@ def compute_beyond_gr_phase_factor(
     Computes the complex exponential phase factor for Beyond-GR waveforms.
     
     Formula:
-    u = (pi * M_sec * f)^(1/3)
-    phase_shift = coupling_parameter * u^pn_exponent
+    pn_velocity = (pi * M_total_sec * f)^(1/3)
+    phase_shift = coupling_parameter * pn_velocity^pn_exponent
     factor = exp(i * phase_shift)
 
     Parameters
@@ -20,7 +20,7 @@ def compute_beyond_gr_phase_factor(
     frequency_array: np.ndarray
         Frequencies at which to compute the phase shift.
     mass_value_solar_masses: float
-        The mass parameter (e.g. chirp mass) in solar masses.
+        The mass parameter (total mass M_total) in solar masses.
     coupling_parameter: float
         The coefficient of the beyond-GR phase term (e.g. beta0).
     pn_exponent: float
@@ -42,11 +42,11 @@ def compute_beyond_gr_phase_factor(
     nonzero_mask = frequency_array > 0
     f_nonzero = frequency_array[nonzero_mask]
 
-    # Calculate u
-    u = (np.pi * mass_sec * f_nonzero) ** (1.0 / 3.0)
+    # Calculate post-Newtonian velocity parameter pn_velocity: (pi * M_total * f)^(1/3)
+    pn_velocity = (np.pi * mass_sec * f_nonzero) ** (1.0 / 3.0)
     
-    # Calculate phase shift
-    phase_shift = coupling_parameter * (u ** pn_exponent)
+    # Calculate phase shift: coupling_parameter * pn_velocity^pn_exponent
+    phase_shift = coupling_parameter * (pn_velocity ** pn_exponent)
 
     # Calculate complex factor
     factor = np.ones(len(frequency_array), dtype=np.complex128)
@@ -79,7 +79,7 @@ def inject_phase(
     pn_exponent: float
         The PN exponent for the term (-3).
     mass_definition: float
-        The mass parameter in solar masses (chirp mass).
+        The mass parameter in solar masses (total mass M_total).
         
     Returns
     -------

@@ -1,0 +1,39 @@
+================================================================================
+BEYOND-GR 1D POSTERIOR RECOVERY & SCIENTIFIC DIAGNOSTIC REPORT
+================================================================================
+Execution Timestamp          : 2026-09-19 02:57:10
+Model Checkpoint             : model_latest.pt
+Validation Waveforms Evaluated: 50
+Posterior Samples / Waveform : 2000
+Noise Injection Mode         : Stationary Gaussian noise
+
+--------------------------------------------------------------------------------
+1. QUANTITATIVE PERFORMANCE METRICS
+--------------------------------------------------------------------------------
+Injected beta0 Range         : [-4.9986, +4.9978]
+Mean Posterior Median        : +0.1929
+Median 90% CI Width          : 9.0163
+Mean Absolute Bias           : 2.3767
+Median Absolute Bias         : 2.4278
+Mean Signed Bias             : +0.2418
+Pearson Correlation (r)      : +0.0191 (p-value: 8.9507e-01)
+Spearman Correlation (rho)   : +0.1001 (p-value: 4.8928e-01)
+Nominal Credible Interval    : 90.0%
+Empirical Coverage           : 90.0% (45/50 covered)
+Coverage Difference          : +0.0%
+
+--------------------------------------------------------------------------------
+2. SCIENTIFIC SANITY CHECKS
+--------------------------------------------------------------------------------
+Linear Regression Fit        : hat(beta0) = 0.0026 * beta0_true + +0.1930
+Variance Ratio Var(hat)/Var  : 0.0183
+Posterior Width Std Dev      : 0.1746
+Lower Bound Saturation (<-4.75): 0.0%
+Upper Bound Saturation (>+4.75): 0.0%
+
+Findings & Scientific Interpretation:
+  * Responsiveness: Weak or near-zero correlation (r = 0.019). Posterior medians DO NOT track injected beta0.
+  * Distribution  : EVIDENCE OF POSTERIOR COLLAPSE (Var(hat(beta))/Var(beta) = 0.0183 < 0.10). The posterior medians hover near 0.193 across all injections, indicating that the flow has converged to predicting approximately the marginal prior rather than a sharp conditional posterior.
+  * Bias Trend    : Strong systematic slope deviation (slope = 0.003 vs ideal 1.000). As a consequence, bias is systematically anti-correlated with beta_true (slope ~ -0.997).
+  * Credible Width: Posterior widths are nearly invariant across injections (median width = 9.02, std = 0.175). The flow outputs a constant broad uncertainty interval.
+  * Coverage Check: Empirical coverage (90.0%) matches the nominal 90% level closely.

@@ -375,10 +375,16 @@ class Sampler(object):
                 print("===================================================") """
 
         if not self.unconditional_model:
-            # Squeeze the batch dimension added earlier
-            # (and potential num_samples=1 in NormalizingFlow).
-            y = y.squeeze()
-            log_prob = log_prob.squeeze()
+            # Squeeze event batch dimension (axis 0) if present.
+            # Avoid global squeeze to protect 1D parameter dimensions.
+            if y.ndim == 3 and y.shape[0] == 1:
+                y = y.squeeze(0)
+            elif y.ndim == 3 and y.shape[1] == 1:
+                y = y[:, 0, :]
+            if log_prob.ndim == 2 and log_prob.shape[0] == 1:
+                log_prob = log_prob.squeeze(0)
+            elif log_prob.ndim == 2 and log_prob.shape[1] == 1:
+                log_prob = log_prob[:, 0]
 
         # ============================================================
         # DEBUG: IDENTIFY ACTUAL FLOW PARAMETER KEYS
@@ -526,6 +532,31 @@ class Sampler(object):
         # Apply any post-sampling transformation to sampled parameters (e.g.,
         # correction for t_ref) and represent as DataFrame.
         self._post_process(samples)
+
+        # DEBUG: inspect every sample column before DataFrame construction
+        print("\n========== FINAL SAMPLE SHAPES ==========")
+        for k, v in samples.items():
+            arr = np.asarray(v)
+            print(
+                f"{k:25s} "
+                f"type={type(v).__name__:12s} "
+                f"shape={arr.shape} "
+                f"ndim={arr.ndim}"
+            )
+
+        # Flatten only singleton trailing dimensions.
+        for k, v in samples.items():
+            arr = np.asarray(v)
+
+            if arr.ndim == 2 and arr.shape[1] == 1:
+                samples[k] = arr[:, 0]
+
+            elif arr.ndim != 1:
+                raise ValueError(
+                    f"Sampler output '{k}' has invalid shape {arr.shape}. "
+                    "Expected a 1D array of length num_samples."
+                )
+
         self.samples = pd.DataFrame(samples)
         print(f"Done. This took {time.time() - t0:.1f} s.")
         sys.stdout.flush()

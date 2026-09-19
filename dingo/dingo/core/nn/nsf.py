@@ -270,7 +270,7 @@ class FlowWrapper(nn.Module):
     def sample(self, *x, num_samples=1):
         if len(x) > 0:
             if self.embedding_net is not None:
-                x = self.embedding_net(*x)
+                x, _ = self.embedding_net(*x)
             return self.flow.sample(num_samples, x)
         else:
             # if there is no context, omit the context argument
@@ -401,15 +401,10 @@ def create_nsf_with_embedding_net(
 
     flow = create_nsf_model(**posterior_kwargs_nbrg)
     
-    if beyond_gr:
-        try:
-            from dingo.gw.beyond_gr.beyond_gr_flow_wrapper import BeyondGRFlowWrapper
-            model = BeyondGRFlowWrapper(flow, embedding_net)
-        except ImportError:
-            model = FlowWrapper(flow, embedding_net)
-    else:
-        model = FlowWrapper(flow, embedding_net)
-    return model
+    # Beyond-GR targets are handled exactly like ordinary posterior targets. The
+    # embedding is the only context, so concatenating physical/proxy parameters
+    # here would change the learned context contract.
+    return FlowWrapper(flow, embedding_net)
 
 
 if __name__ == "__main__":

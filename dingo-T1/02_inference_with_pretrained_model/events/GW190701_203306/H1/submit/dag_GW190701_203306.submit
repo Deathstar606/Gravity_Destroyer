@@ -1,0 +1,12 @@
+JOB GW190701_203306_data0_1246048404-56_generation_arg_0 events/GW190701_203306/H1/submit/GW190701_203306_data0_1246048404-56_generation.submit
+VARS GW190701_203306_data0_1246048404-56_generation_arg_0 ARGS="events/GW190701_203306/H1/GW190701_203306_config_complete.ini --reuse-event-data true --label GW190701_203306_data0_1246048404-56_generation --idx 0 --trigger-time 1246048404.56 --outdir events/GW190701_203306/H1"
+Retry GW190701_203306_data0_1246048404-56_generation_arg_0 3
+JOB GW190701_203306_data0_1246048404-56_sampling_arg_0 events/GW190701_203306/H1/submit/GW190701_203306_data0_1246048404-56_sampling.submit
+VARS GW190701_203306_data0_1246048404-56_sampling_arg_0 ARGS="events/GW190701_203306/H1/GW190701_203306_config_complete.ini --reuse-event-data true --label GW190701_203306_data0_1246048404-56_sampling --event-data-file events/GW190701_203306/H1/data/GW190701_203306_data0_1246048404-56_generation_event_data.hdf5 --outdir events/GW190701_203306/H1"
+JOB GW190701_203306_data0_1246048404-56_sampling_plot_arg_0 events/GW190701_203306/H1/submit/GW190701_203306_data0_1246048404-56_sampling_plot.submit
+VARS GW190701_203306_data0_1246048404-56_sampling_plot_arg_0 ARGS="--label GW190701_203306_data0_1246048404-56_sampling_plot --result events/GW190701_203306/H1/result/GW190701_203306_data0_1246048404-56_sampling.hdf5 --outdir events/GW190701_203306/H1/result --corner --weights --log_probs"
+ENV GET HTGETTOKENOPTS
+
+#Inter-job dependencies
+Parent GW190701_203306_data0_1246048404-56_generation_arg_0 Child GW190701_203306_data0_1246048404-56_sampling_arg_0
+Parent GW190701_203306_data0_1246048404-56_sampling_arg_0 Child GW190701_203306_data0_1246048404-56_sampling_plot_arg_0

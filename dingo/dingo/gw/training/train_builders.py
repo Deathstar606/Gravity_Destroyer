@@ -28,9 +28,6 @@ from dingo.gw.transforms import (
     CropMaskStrainRandom,
     TimeShiftStrainGrid,
     StrainTokenization,
-    ComputeBeyondGRParameters,
-    SampleBeyondGRProxy,
-    OnlineBeyondGRRotation,
     DropFrequenciesToUpdateRange,
     DropFrequencyInterval,
     DropDetectors,
@@ -146,6 +143,17 @@ def set_train_transforms( #dataset transforms for training
     if data_settings["inference_parameters"] == "default":
         data_settings["inference_parameters"] = default_inference_parameters
 
+    if "beta_true" in data_settings["inference_parameters"]:
+        if "beta_true" not in wfd.parameters and "beta0_true" in wfd.parameters:
+            wfd.parameters["beta_true"] = wfd.parameters["beta0_true"]
+        if "beta_true" not in wfd.parameters:
+            raise KeyError(
+                "Training requires beta_true in the waveform dataset parameters."
+            )
+        beta_values = wfd.parameters["beta_true"]
+        if beta_values.isna().any() or not beta_values.between(-5.0, 5.0).all():
+            raise ValueError("beta_true must be finite and lie in the range [-5, 5].")
+
     ref_time = data_settings["ref_time"]
     # Build detector objects
     ifo_list = InterferometerList(data_settings["detectors"])
@@ -154,8 +162,6 @@ def set_train_transforms( #dataset transforms for training
     transforms = [
         SampleExtrinsicParameters(extrinsic_prior_dict),
         GetDetectorTimes(ifo_list, ref_time),
-        ComputeBeyondGRParameters(),
-        SampleBeyondGRProxy()
     ]
 
     extra_context_parameters = []
@@ -201,7 +207,6 @@ def set_train_transforms( #dataset transforms for training
         )
         data_settings["standardization"] = standardization_dict
 
-    transforms.append(OnlineBeyondGRRotation(domain))
     transforms.append(ProjectOntoDetectors(ifo_list, domain, ref_time))
     transforms.append(SampleNoiseASD(asd_dataset))
     transforms.append(WhitenAndScaleStrain(domain.noise_std))

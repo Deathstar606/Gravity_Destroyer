@@ -65,6 +65,12 @@ def fill_in_arguments_from_model(args, perform_arg_checks=True):
 
     model_metadata = model.metadata
 
+    from dingo.gw.inference.gw_samplers import _is_beyond_gr_model
+
+    if _is_beyond_gr_model(model):
+        logger.info("Beyond-GR model detected: disabling importance sampling.")
+        args.importance_sample = False
+
     domain = build_domain_from_model_metadata(model_metadata, base=True)
 
     prior = Injection.from_posterior_model_metadata(model_metadata).prior
@@ -363,6 +369,18 @@ class MainInput(BilbyMainInput):
             )
 
         self.importance_sample = args.importance_sample
+        if self.importance_sample and getattr(args, "model", None):
+            try:
+                from dingo.gw.inference.gw_samplers import _is_beyond_gr_model
+                from dingo.core.posterior_models import build_model_from_kwargs
+
+                m = build_model_from_kwargs(
+                    filename=args.model, device="meta", load_training_info=False
+                )
+                if _is_beyond_gr_model(m):
+                    self.importance_sample = False
+            except Exception:
+                pass
 
         self.request_disk = args.request_disk
         self.request_memory = args.request_memory
@@ -580,7 +598,7 @@ def write_complete_config_file(parser, args, inputs, input_cls=MainInput):
     parser.write_to_file(
         filename=inputs.complete_ini_file,
         args=args,
-        overwrite=False,
+        overwrite=True,
         include_description=False,
     )
 

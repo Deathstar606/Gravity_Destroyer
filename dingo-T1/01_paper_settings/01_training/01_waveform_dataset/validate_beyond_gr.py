@@ -12,14 +12,16 @@ from dingo.gw.dataset.waveform_dataset import WaveformDataset
 from dingo.gw.transforms import WhitenFixedASD
 from dingo.gw.SVD import SVDBasis, ApplySVD
 
-def get_expected_phase_shift(frequency_array, chirp_mass, beta0):
-    """Computes the expected Beyond-GR phase shift (without modulo)."""
-    mass_sec = chirp_mass * lal.MTSUN_SI
+from bilby.gw.conversion import chirp_mass_and_mass_ratio_to_total_mass
+
+def get_expected_phase_shift(frequency_array, total_mass, beta0):
+    """Computes the expected Beyond-GR phase shift with pn_velocity = (pi * M_total * f)^(1/3)."""
+    mass_sec = total_mass * lal.MTSUN_SI
     nonzero_mask = frequency_array > 0
     f_nonzero = frequency_array[nonzero_mask]
-    u = (np.pi * mass_sec * f_nonzero) ** (1.0 / 3.0)
+    pn_velocity = (np.pi * mass_sec * f_nonzero) ** (1.0 / 3.0)
     phase_shift = np.zeros_like(frequency_array)
-    phase_shift[nonzero_mask] = beta0 * (u ** -3.0)
+    phase_shift[nonzero_mask] = beta0 * (pn_velocity ** -3.0)
     return phase_shift
 
 def test_beyond_gr_pipeline():
@@ -110,7 +112,8 @@ def test_beyond_gr_pipeline():
             phase_diff = np.angle(pol_inj["h_plus"][nonzero_mask]) - np.angle(pol_gr["h_plus"][nonzero_mask])
             phase_diff_unwrapped = np.unwrap(phase_diff)
             
-            expected_phase = get_expected_phase_shift(domain()[nonzero_mask], p_inj["chirp_mass"], beta0)
+            total_mass_p0 = float(chirp_mass_and_mass_ratio_to_total_mass(p_inj["chirp_mass"], p_inj["mass_ratio"]))
+            expected_phase = get_expected_phase_shift(domain()[nonzero_mask], total_mass_p0, beta0)
             
             # The difference between unwrapped phase and expected phase should be a constant multiple of 2*pi
             phase_error = phase_diff_unwrapped - expected_phase
@@ -121,14 +124,14 @@ def test_beyond_gr_pipeline():
             assert phase_std < 1e-7, f"Phase shift is not constant relative to expectation. std={phase_std}"
             print("  [+] Phase correctness verified.")
 
-    print("\n=== Multiple Chirp Mass u-definition Tests ===")
+    print("\n=== Multiple Total Mass pn_velocity-definition Tests ===")
     for m_chirp in [10.0, 30.0, 50.0]:
         print(f"Testing chirp mass = {m_chirp}...")
         p_mc = p0.copy()
         p_mc["chirp_mass"] = m_chirp
-        # Need to also adjust total mass roughly so generation doesn't fail due to unphysical params
-        # But chirp mass is intrinsic, mass ratio is other param. Let bilby handle total_mass if needed.
-        # Actually our dictionary p0 has mass_ratio and chirp_mass.
+        total_m = float(chirp_mass_and_mass_ratio_to_total_mass(m_chirp, p_mc["mass_ratio"]))
+        p_mc["total_mass"] = total_m
+        
         p_gr_mc = p_mc.copy()
         p_gr_mc["beta0_true"] = 0.0
         
@@ -141,11 +144,11 @@ def test_beyond_gr_pipeline():
         nonzero_mask = np.abs(pol_gr_mc["h_plus"]) > 1e-28
         phase_diff = np.angle(pol_inj_mc["h_plus"][nonzero_mask]) - np.angle(pol_gr_mc["h_plus"][nonzero_mask])
         phase_diff_unwrapped = np.unwrap(phase_diff)
-        expected_phase = get_expected_phase_shift(domain()[nonzero_mask], m_chirp, 1.0)
+        expected_phase = get_expected_phase_shift(domain()[nonzero_mask], total_m, 1.0)
         phase_error = phase_diff_unwrapped - expected_phase
         
-        assert np.std(phase_error) < 1e-7, f"Phase shift fails for m_chirp={m_chirp}. std={np.std(phase_error)}"
-        print(f"  [+] Phase correct for m_chirp = {m_chirp}")
+        assert np.std(phase_error) < 1e-7, f"Phase shift fails for total_m={total_m}. std={np.std(phase_error)}"
+        print(f"  [+] Phase correct for total_mass = {total_m:.4f} (m_chirp = {m_chirp})")
 
     print("\n=== Dataset Transform Tests ===")
     # Check whitening

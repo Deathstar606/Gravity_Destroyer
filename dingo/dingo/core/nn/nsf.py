@@ -261,7 +261,13 @@ class FlowWrapper(nn.Module):
         logging_info = {}
         if len(x) > 0:
             if self.embedding_net is not None:
-                x, logging_info = self.embedding_net(*x)
+                has_trainable_emb = any(
+                    p.requires_grad for p in self.embedding_net.parameters()
+                )
+                with torch.set_grad_enabled(
+                    torch.is_grad_enabled() and has_trainable_emb
+                ):
+                    x, logging_info = self.embedding_net(*x)
             return self.flow.log_prob(y, x), logging_info
         else:
             # if there is no context
@@ -337,6 +343,8 @@ def create_nsf_model(
     # str(embedding_net_builder).split(' ')[1]
 
     distribution = distributions.StandardNormal((input_dim,))
+    if hasattr(distribution, "_log_z") and distribution._log_z.dtype == torch.float64:
+        distribution._log_z = distribution._log_z.to(torch.float32)
     transform = create_transform(
         num_flow_steps, input_dim, context_dim, base_transform_kwargs
     )

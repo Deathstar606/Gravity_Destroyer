@@ -1,0 +1,22 @@
+domain:
+  type: MultibandedFrequencyDomain
+  nodes: [20.0, 38.0, 50.0, 66.0, 82.0, 1810.0]
+  delta_f_initial: 0.125
+  base_domain:
+    type: FrequencyDomain
+    f_min: 20.0
+    f_max: 1809.875
+    delta_f: 0.125
+
+waveform_generator:
+  approximant: IMRPhenomXHM
+  f_ref: 20.0
+  spin_conversion_phase: 0.0
+
+num_samples: 550
+num_processes: 1
+
+compression:
+  whitening: aLIGO_ZERO_DET_high_P_asd.txt
+  svd:
+    file: /home/deathstar/dingorep/dingo-T1/01_paper_settings/01_training/01_waveform_dataset/waveform_dataset.hdf5

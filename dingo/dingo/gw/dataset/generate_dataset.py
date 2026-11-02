@@ -212,7 +212,141 @@ def train_svd_basis(dataset: WaveformDataset, size: int, n_train: int):
     return basis, n_train, n_test
 
 
-def generate_dataset(settings: Dict, num_processes: int) -> WaveformDataset:
+def generate_fixed_intrinsic_parameters(
+    num_per_beta: int = 50,
+    beta_grid: list = None,
+    fixed_config: dict = None,
+) -> pd.DataFrame:
+    if beta_grid is None:
+        beta_grid = [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+
+    # Fixed parameters specified in user instructions
+    m1 = 60.0
+    m2 = 30.0
+    total_m = m1 + m2
+    q = m2 / m1
+    chirp_m = float((m1 * m2) ** (3.0 / 5.0) / (total_m) ** (1.0 / 5.0))
+
+    default_fixed = {
+        "mass_1": m1,
+        "mass_2": m2,
+        "chirp_mass": chirp_m,
+        "mass_ratio": q,
+        "total_mass": total_m,
+        "a_1": 0.5,
+        "a_2": 0.5,
+        "tilt_1": 0.0,
+        "tilt_2": 0.0,
+        "phi_12": 0.0,
+        "phi_jl": 0.0,
+        "luminosity_distance": 100.0,
+        "theta_jn": float(np.pi / 3.0),
+        "phase": 0.0,
+        "geocent_time": 0.0,
+    }
+    if fixed_config:
+        default_fixed.update(fixed_config)
+
+    rows = []
+    for b in beta_grid:
+        for seed_idx in range(num_per_beta):
+            row = copy.deepcopy(default_fixed)
+            row["beta_true"] = float(b)
+            row["beta0_true"] = float(b)
+            row["noise_seed"] = int(seed_idx)
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return df
+
+
+def verify_fixed_intrinsic_parameters(
+    df: pd.DataFrame, validation_file: str = None
+) -> None:
+    import os
+    fixed_keys = [
+        "mass_1",
+        "mass_2",
+        "total_mass",
+        "chirp_mass",
+        "mass_ratio",
+        "a_1",
+        "a_2",
+        "tilt_1",
+        "tilt_2",
+        "phi_12",
+        "phi_jl",
+        "luminosity_distance",
+        "theta_jn",
+        "phase",
+        "geocent_time",
+    ]
+    lines = [
+        "=" * 80,
+        "FIXED-INTRINSIC DATASET VALIDATION REPORT",
+        "=" * 80,
+        f"Total Waveforms Generated : {len(df)}",
+        f"Columns Present           : {list(df.columns)}",
+        "",
+        "--- Fixed Parameter Consistency Checks ---",
+    ]
+    for k in fixed_keys:
+        if k in df:
+            vals = df[k].unique()
+            std_val = float(df[k].std())
+            lines.append(
+                f"  {k:20s}: fixed_value = {vals[0]:.6f}, unique_count = {len(vals)}, std = {std_val:.2e}"
+            )
+            if len(vals) != 1 or std_val > 1e-12:
+                raise AssertionError(f"FATAL: Parameter '{k}' varies! Unique values: {vals}")
+        else:
+            raise AssertionError(
+                f"FATAL: Required parameter '{k}' is missing from parameters!"
+            )
+
+    # Check beta_true values and counts
+    beta_counts = df["beta_true"].value_counts().sort_index()
+    lines.append("\n--- Beta Distribution Checks ---")
+    lines.append(f"  Unique beta_true values   : {list(beta_counts.index)}")
+    lines.append(f"  Counts per beta_true      : {dict(beta_counts)}")
+    expected_betas = [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    if list(beta_counts.index) != expected_betas:
+        raise AssertionError(
+            f"FATAL: Beta grid mismatch! Expected {expected_betas}, got {list(beta_counts.index)}"
+        )
+    if not all(c == 50 for c in beta_counts.values):
+        raise AssertionError(
+            f"FATAL: Expected 50 waveforms per beta value, got {dict(beta_counts)}"
+        )
+
+    # Check noise_seed structure
+    lines.append("\n--- Noise Seed Pairing Checks ---")
+    for b in expected_betas:
+        sub = df[df["beta_true"] == b]
+        seeds = sorted(sub["noise_seed"].tolist())
+        if seeds != list(range(50)):
+            raise AssertionError(f"FATAL: Noise seed mismatch for beta={b}!")
+    lines.append(
+        "  Verified paired noise seeds: Exactly seeds [0..49] present for every beta value."
+    )
+    lines.append("\n--> ALL FIXED-INTRINSIC VALIDATION CHECKS PASSED [SUCCESS]")
+    lines.append("=" * 80)
+
+    report_text = "\n".join(lines)
+    print("\n" + report_text + "\n")
+    if validation_file:
+        os.makedirs(os.path.dirname(os.path.abspath(validation_file)), exist_ok=True)
+        with open(validation_file, "w") as f:
+            f.write(report_text + "\n")
+        print(f"Saved dataset validation report to: {validation_file}")
+
+
+def generate_dataset(
+    settings: Dict,
+    num_processes: int,
+    fixed_intrinsic: bool = False,
+    validation_file: str = None,
+) -> WaveformDataset:
     """
     Generate a waveform dataset.
 
@@ -221,13 +355,21 @@ def generate_dataset(settings: Dict, num_processes: int) -> WaveformDataset:
     settings : dict
         Dictionary of settings to configure the dataset
     num_processes : int
+    fixed_intrinsic : bool
+        If True, generate a controlled fixed-intrinsic dataset across beta_true grid.
+    validation_file : str
+        Optional path to save validation report for fixed-intrinsic dataset.
 
     Returns
     -------
     A WaveformDataset based on the settings.
     """
 
-    prior = build_prior_with_defaults(settings["intrinsic_prior"])
+    prior = (
+        build_prior_with_defaults(settings["intrinsic_prior"])
+        if "intrinsic_prior" in settings
+        else None
+    )
     domain = build_domain(settings["domain"])
 
     new_interface_flag = settings["waveform_generator"].get("new_interface", False)
@@ -264,7 +406,17 @@ def generate_dataset(settings: Dict, num_processes: int) -> WaveformDataset:
 
             # Load an SVD basis from file, if specified.
             if "file" in svd_settings:
-                basis = SVDBasis(file_name=svd_settings["file"])
+                svd_file = svd_settings["file"]
+                try:
+                    basis = SVDBasis(file_name=svd_file)
+                except Exception:
+                    import h5py
+                    with h5py.File(svd_file, "r") as f:
+                        if "svd" in f:
+                            svd_dict = {k: f["svd"][k][()] for k in f["svd"]}
+                            basis = SVDBasis(dictionary=svd_dict)
+                        else:
+                            raise
 
             # Otherwise, generate the basis based on simulated waveforms.
             else:
@@ -310,6 +462,31 @@ def generate_dataset(settings: Dict, num_processes: int) -> WaveformDataset:
 
         waveform_generator.transform = Compose(compression_transforms)
 
+    if fixed_intrinsic or settings.get("fixed_intrinsic", False):
+        print("\n" + "=" * 80)
+        print("GENERATING CONTROLLED FIXED-INTRINSIC DATASET")
+        print("=" * 80)
+        parameters = generate_fixed_intrinsic_parameters(
+            num_per_beta=settings.get("num_per_beta", 50),
+            beta_grid=settings.get("beta_grid", None),
+            fixed_config=settings.get("fixed_intrinsic_config", None),
+        )
+        if num_processes > 1:
+            with threadpool_limits(limits=1, user_api="blas"):
+                with Pool(processes=num_processes) as pool:
+                    polarizations = generate_waveforms_parallel(
+                        waveform_generator, parameters, pool
+                    )
+        else:
+            polarizations = generate_waveforms_parallel(waveform_generator, parameters)
+
+        verify_fixed_intrinsic_parameters(parameters, validation_file)
+        dataset_dict["parameters"] = parameters
+        dataset_dict["polarizations"] = polarizations
+        dataset_dict[len(parameters)] = len(parameters)
+        dataset = WaveformDataset(dictionary=dataset_dict)
+        return dataset
+
     func = partial(
         generate_parameters_and_polarizations,
         waveform_generator,
@@ -354,11 +531,27 @@ def parse_args():
         default="waveform_dataset.hdf5",
         help="Name of file for storing dataset.",
     )
+    parser.add_argument(
+        "--fixed_intrinsic",
+        action="store_true",
+        default=False,
+        help="Generate controlled fixed-intrinsic diagnostic dataset for Beyond-GR testing",
+    )
+    parser.add_argument(
+        "--fixed_intrinsic_validation_file",
+        type=str,
+        default=None,
+        help="Output path for validation report",
+    )
     return parser.parse_args()
 
 
 def _generate_dataset_main(
-    settings_file: str, out_file: str, num_processes: int
+    settings_file: str,
+    out_file: str,
+    num_processes: int,
+    fixed_intrinsic: bool = False,
+    validation_file: str = None,
 ) -> None:
     if not Path(settings_file).is_file():
         raise FileNotFoundError(f"dataset generation, failed to find {settings_file}")
@@ -371,13 +564,24 @@ def _generate_dataset_main(
     with open(settings_file, "r") as f:
         settings = yaml.safe_load(f)
 
-    dataset = generate_dataset(settings, num_processes)
+    dataset = generate_dataset(
+        settings,
+        num_processes,
+        fixed_intrinsic=fixed_intrinsic,
+        validation_file=validation_file,
+    )
     dataset.to_file(str(out_file))
 
 
 def main() -> None:
     args = parse_args()
-    _generate_dataset_main(args.settings_file, args.out_file, args.num_processes)
+    _generate_dataset_main(
+        args.settings_file,
+        args.out_file,
+        args.num_processes,
+        fixed_intrinsic=args.fixed_intrinsic,
+        validation_file=args.fixed_intrinsic_validation_file,
+    )
 
 
 if __name__ == "__main__":

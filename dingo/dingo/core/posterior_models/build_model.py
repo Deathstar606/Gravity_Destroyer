@@ -142,6 +142,7 @@ def build_model_from_kwargs(
         model_filename=filename,
         metadata=settings,
         embedding_net_builder=emb_net_builder,
+        load_embedding_only=load_embedding_only,
         **kwargs,
     )
 

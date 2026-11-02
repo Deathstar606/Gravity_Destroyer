@@ -42,8 +42,10 @@ data:
         max_width: 10.
 
 model:
+  # Fluidly resolved based on training.stage_0.freeze_all_except_last_n_layers:
+  # - freeze_all_except_last_n_layers == 0 -> dingo_t1.pt
+  # - freeze_all_except_last_n_layers > 0  -> model_stage_0.pt
   beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/dingo_t1.pt
-  #beyond_gr_checkpoint: /home/deathstar/dingorep/dingo-T1/02_inference_with_pretrained_model/model_stage_0.pt
   posterior_model_type: normalizing_flow
   posterior_kwargs:
     beyond_gr: True
@@ -113,7 +115,7 @@ training:
 
 local:
   device: xpu # Intel Arc GPU
-  num_workers: 4 # Reduced from 8 for single GPU
+  num_workers: 2 # Reduced to prevent WSL2/WDDM host RAM exhaustion
   runtime_limits:
     max_time_per_run: 1_000_000
     max_epochs_per_run: 50

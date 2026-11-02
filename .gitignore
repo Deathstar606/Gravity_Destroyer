@@ -2,3 +2,7 @@
 *.h5
 *.hdf5
 *.pt
+
+# Diagnostics folder
+diagnostics/
+dingo-T1/diagnostics/

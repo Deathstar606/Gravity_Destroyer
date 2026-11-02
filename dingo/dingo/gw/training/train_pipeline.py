@@ -134,10 +134,15 @@ def prepare_wfd_and_initialization_for_embedding_network(
     (WaveformDataset, initial_weights, BasePosteriorModel)
     """
     data_settings = deepcopy(train_settings["data"])
-    # Optionally copy files to local and update path
+    # Optionally copy files to local and update path (respecting copy_waveform_dataset_to_tmp)
+    local_cache_path = (
+        local_settings.get("local_cache_path", None)
+        if local_settings.get("copy_waveform_dataset_to_tmp", True)
+        else None
+    )
     data_settings["waveform_dataset_path"] = copy_files_to_local(
         file_path=data_settings["waveform_dataset_path"],
-        local_dir=local_settings.get("local_cache_path", None),
+        local_dir=local_cache_path,
         leave_keys_on_disk=local_settings.get("leave_waveforms_on_disk", True),
         is_condor=True if "condor" in local_settings else False,
     )
@@ -220,20 +225,17 @@ def prepare_wfd_and_initialization_for_embedding_network(
             pretrained_embedding_net = pm.network.embedding_net
             
         elif not pretraining and "beyond_gr_checkpoint" in train_settings.get("model", {}):
-            pretrained_model_path = train_settings["model"]["beyond_gr_checkpoint"]
+            pretrained_model_path = resolve_beyond_gr_checkpoint(
+                train_settings, train_dir=train_dir
+            )
             if not os.path.isfile(pretrained_model_path):
                 raise ValueError(f"No pretrained model found at {pretrained_model_path}.")
             if print_output:
-                print(f"Loading embedding weights from pretrained Beyond-GR base model at {pretrained_model_path} ❄️.")
-            pm = build_model_from_kwargs(
-                filename=pretrained_model_path,
-                pretraining=False,
-                pretrained_embedding_net=None,
-                load_embedding_only=True,
-                device=local_settings["device"],
-                print_output=print_output,
-            )
-            pretrained_embedding_net = pm.network.embedding_net
+                print(
+                    f"Resolved Beyond-GR checkpoint to {pretrained_model_path} "
+                    f"(freeze_all_except_last_n_layers="
+                    f"{train_settings.get('training', {}).get('stage_0', {}).get('freeze_all_except_last_n_layers', 0)})."
+                )
     else:
 
         raise ValueError("No embedding_kwargs specified in model.")
@@ -253,6 +255,44 @@ def prepare_wfd_and_initialization_for_embedding_network(
     )
 
     return wfd, initial_weights, pretrained_embedding_net
+
+
+def resolve_beyond_gr_checkpoint(
+    train_settings: dict, train_dir: Optional[str] = None
+) -> Optional[str]:
+    """
+    Fluidly resolve `model.beyond_gr_checkpoint` based on `freeze_all_except_last_n_layers`:
+    - If `freeze_all_except_last_n_layers == 0`: use `dingo_t1.pt`
+    - If `freeze_all_except_last_n_layers > 0`: use `model_stage_0.pt`
+    Updates `train_settings["model"]["beyond_gr_checkpoint"]` in-place.
+    """
+    model_settings = train_settings.get("model", {})
+    if "beyond_gr_checkpoint" not in model_settings:
+        return None
+
+    configured_path = model_settings["beyond_gr_checkpoint"]
+    ckpt_dir = (
+        os.path.dirname(configured_path)
+        if os.path.splitext(configured_path)[1]
+        else configured_path
+    )
+    freeze_n = (
+        train_settings.get("training", {})
+        .get("stage_0", {})
+        .get("freeze_all_except_last_n_layers", 0)
+    )
+
+    if freeze_n is not None and freeze_n > 0:
+        resolved_path = os.path.join(ckpt_dir, "model_stage_0.pt")
+        if not os.path.isfile(resolved_path) and train_dir is not None:
+            alt_path = os.path.join(train_dir, "model_stage_0.pt")
+            if os.path.isfile(alt_path):
+                resolved_path = alt_path
+    else:
+        resolved_path = os.path.join(ckpt_dir, "dingo_t1.pt")
+
+    model_settings["beyond_gr_checkpoint"] = resolved_path
+    return resolved_path
 
 
 def prepare_model_new(
@@ -310,6 +350,14 @@ def prepare_model_new(
         if ("rank" not in local_settings or local_settings.get("rank", None) == 0)
         else False
     )
+    has_beyond_gr_ckpt = (
+        not pretraining
+        and pretrained_embedding_net is None
+        and "beyond_gr_checkpoint" in train_settings.get("model", {})
+    )
+    if has_beyond_gr_ckpt:
+        resolve_beyond_gr_checkpoint(train_settings, train_dir=train_dir)
+
     if print_output:
         print("\nInitializing new posterior model.")
         print("Complete settings:")
@@ -320,9 +368,31 @@ def prepare_model_new(
         pretraining=pretraining,
         pretrained_embedding_net=pretrained_embedding_net,
         initial_weights=initial_weights,
-        device=local_settings["device"],
+        device="cpu" if has_beyond_gr_ckpt else local_settings["device"],
         print_output=print_output,
     )
+
+    if has_beyond_gr_ckpt:
+        pretrained_model_path = train_settings["model"]["beyond_gr_checkpoint"]
+        freeze_n = (
+            train_settings.get("training", {})
+            .get("stage_0", {})
+            .get("freeze_all_except_last_n_layers", 0)
+        )
+        if print_output:
+            if freeze_n is not None and freeze_n > 0:
+                print(
+                    f"Loading full model weights (embedding + flow.*) from Stage 0 checkpoint at {pretrained_model_path} 🔥."
+                )
+            else:
+                print(
+                    f"Loading embedding weights (skipping flow.*) from pretrained Beyond-GR base model at {pretrained_model_path} ❄️."
+                )
+        pm.load_embedding_weights_only(
+            model_filename=pretrained_model_path,
+            device=local_settings["device"],
+            freeze_all_except_last_n_layers=freeze_n,
+        )
 
     if local_settings.get("wandb", False) and local_settings.get("rank", 0.0) == 0.0:
         try:
@@ -496,10 +566,15 @@ def prepare_training_resume(
     train_settings = load_settings_from_ckpt(checkpoint_name)
 
     data_settings = deepcopy(train_settings["data"])
-    # Optionally copy files to local and update path
+    # Optionally copy files to local and update path (respecting copy_waveform_dataset_to_tmp)
+    local_cache_path = (
+        local_settings.get("local_cache_path", None)
+        if local_settings.get("copy_waveform_dataset_to_tmp", True)
+        else None
+    )
     data_settings["waveform_dataset_path"] = copy_files_to_local(
         file_path=data_settings["waveform_dataset_path"],
-        local_dir=local_settings.get("local_cache_path", None),
+        local_dir=local_cache_path,
         leave_keys_on_disk=local_settings.get("leave_waveforms_on_disk", True),
         is_condor=True if "condor" in local_settings else False,
     )
@@ -587,6 +662,59 @@ def initialize_stage(
         rank=rank,
     )
 
+    # Freeze/unfreeze layers of the transformer based on stage settings BEFORE
+    # initializing the optimizer so only trainable parameters enter optimizer param_groups
+    if "freeze_all_except_last_n_layers" in stage:
+        n_layers_to_unfreeze = stage["freeze_all_except_last_n_layers"]
+        embedding_net = getattr(pm.network, 'embedding_net', pm.network)
+        if hasattr(embedding_net, 'freeze_all_except_last_n_layers'):
+            if n_layers_to_unfreeze == -1:
+                embedding_net.unfreeze_all_layers()
+                if print_output:
+                    print("Unfroze all layers of the embedding network.")
+            else:
+                embedding_net.freeze_all_except_last_n_layers(n=n_layers_to_unfreeze)
+                print("\n========== VERIFY AFTER FREEZE ==========")
+
+                print(type(embedding_net))
+
+                print("Transformer layers:",
+                    len(embedding_net.transformer_encoder.layers))
+
+                for i, layer in enumerate(embedding_net.transformer_encoder.layers):
+
+                    grads = [p.requires_grad for p in layer.parameters()]
+
+                    print(
+                        f"Layer {i}:",
+                        "TRAINABLE" if any(grads) else "Frozen"
+                    )
+
+                print("========================================\n")
+                if print_output:
+                    print(f"Froze all except last {n_layers_to_unfreeze} layers of the embedding network.")
+        else:
+            if print_output:
+                print("Warning: freeze_all_except_last_n_layers method not found. Attempting manual freezing.")
+            for param in pm.network.parameters():
+                param.requires_grad = False
+
+    # Freeze/unfreeze RB layer if necessary
+    if "freeze_rb_layer" in stage:
+        if stage["freeze_rb_layer"]:
+            # Multi-GPU training: Changes to the model have to be made before wrapping the model in DDP
+            if world_size is not None and world_size > 1:
+                raise ValueError(
+                    f"Not possible to freeze RB layer during multi-GPU training."
+                )
+            set_requires_grad_flag(
+                pm.network, name_contains="layers_rb", requires_grad=False
+            )
+        else:
+            set_requires_grad_flag(
+                pm.network, name_contains="layers_rb", requires_grad=True
+            )
+
     if not resume:
         # New optimizer and scheduler. If we are resuming, these should have been
         # loaded from the checkpoint.
@@ -654,57 +782,6 @@ def initialize_stage(
         print("Total optimizer tensors:", total)
         print("===========================================\n")
 
-    # Freeze/unfreeze layers of the transformer based on stage settings
-    if "freeze_all_except_last_n_layers" in stage:
-        n_layers_to_unfreeze = stage["freeze_all_except_last_n_layers"]
-        embedding_net = getattr(pm.network, 'embedding_net', pm.network)
-        if hasattr(embedding_net, 'freeze_all_except_last_n_layers'):
-            if n_layers_to_unfreeze == -1:
-                embedding_net.unfreeze_all_layers()
-                if print_output:
-                    print("Unfroze all layers of the embedding network.")
-            else:
-                embedding_net.freeze_all_except_last_n_layers(n=n_layers_to_unfreeze)
-                print("\n========== VERIFY AFTER FREEZE ==========")
-
-                print(type(embedding_net))
-
-                print("Transformer layers:",
-                    len(embedding_net.transformer_encoder.layers))
-
-                for i, layer in enumerate(embedding_net.transformer_encoder.layers):
-
-                    grads = [p.requires_grad for p in layer.parameters()]
-
-                    print(
-                        f"Layer {i}:",
-                        "TRAINABLE" if any(grads) else "Frozen"
-                    )
-
-                print("========================================\n")
-                if print_output:
-                    print(f"Froze all except last {n_layers_to_unfreeze} layers of the embedding network.")
-        else:
-            if print_output:
-                print("Warning: freeze_all_except_last_n_layers method not found. Attempting manual freezing.")
-            for param in pm.network.parameters():
-                param.requires_grad = False
-
-    # Freeze/unfreeze RB layer if necessary
-    if "freeze_rb_layer" in stage:
-        if stage["freeze_rb_layer"]:
-            # Multi-GPU training: Changes to the model have to be made before wrapping the model in DDP
-            if world_size is not None and world_size > 1:
-                raise ValueError(
-                    f"Not possible to freeze RB layer during multi-GPU training."
-                )
-            set_requires_grad_flag(
-                pm.network, name_contains="layers_rb", requires_grad=False
-            )
-        else:
-            set_requires_grad_flag(
-                pm.network, name_contains="layers_rb", requires_grad=True
-            )
     if print_output:
         print_number_of_model_parameters(network=pm.network)
 
@@ -825,6 +902,19 @@ def train_stages(
             save_file = os.path.join(train_dir, f"model_stage_{n}.pt")
             print(f"Training stage complete. Saving to {save_file}.")
             pm.save_model(save_file, save_training_info=True)
+            if (
+                n == 0
+                and stage.get("freeze_all_except_last_n_layers", 0) == 0
+                and "beyond_gr_checkpoint" in train_settings.get("model", {})
+            ):
+                ckpt_dir = os.path.dirname(
+                    train_settings["model"]["beyond_gr_checkpoint"]
+                )
+                if os.path.isdir(ckpt_dir):
+                    shared_stage0 = os.path.join(ckpt_dir, "model_stage_0.pt")
+                    if os.path.abspath(shared_stage0) != os.path.abspath(save_file):
+                        print(f"Also saving Stage 0 checkpoint to {shared_stage0}.")
+                        pm.save_model(shared_stage0, save_training_info=True)
 
         if runtime_limits.local_limits_exceeded(pm.epoch):
             if print_bool:

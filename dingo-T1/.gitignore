@@ -213,3 +213,6 @@ __marimo__/
 *dingo_baseline.pt
 *dingo_t1.pt
 *.pt
+
+# Diagnostics folder
+diagnostics/

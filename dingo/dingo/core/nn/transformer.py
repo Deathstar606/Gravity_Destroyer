@@ -25,21 +25,32 @@ class TransformerEncoderLayer(PyTorchTransformerEncoderLayer):
         """
         Forward pass with gradient debugging.
         """
-        # Self-attention block
-        if self.norm_first:
-            x = src + self._sa_block(self.norm1(src), src_mask, src_key_padding_mask, is_causal=is_causal)
-        else:
-            x = self.norm1(src + self._sa_block(src, src_mask, src_key_padding_mask, is_causal=is_causal))
+        layer_trainable = src.requires_grad or any(
+            p.requires_grad for p in self.parameters()
+        )
+        with torch.set_grad_enabled(torch.is_grad_enabled() and layer_trainable):
+            # Self-attention block
+            if self.norm_first:
+                x = src + self._sa_block(
+                    self.norm1(src), src_mask, src_key_padding_mask, is_causal=is_causal
+                )
+            else:
+                x = self.norm1(
+                    src
+                    + self._sa_block(
+                        src, src_mask, src_key_padding_mask, is_causal=is_causal
+                    )
+                )
 
-        # Feed-forward block with debugging
-        if self.norm_first:
-            x_pre_ff = x
-            x = x + self._ff_block_debug(self.norm2(x))
-        else:
-            x_pre_ff = x
-            x = self.norm2(x + self._ff_block_debug(x))
+            # Feed-forward block with debugging
+            if self.norm_first:
+                x_pre_ff = x
+                x = x + self._ff_block_debug(self.norm2(x))
+            else:
+                x_pre_ff = x
+                x = self.norm2(x + self._ff_block_debug(x))
 
-        return x
+            return x
 
     def _ff_block_debug(self, x: Tensor) -> Tensor:
         """
@@ -613,6 +624,11 @@ class TransformerModel(nn.Module):
             for param in self.block_encoding.parameters():
                 param.requires_grad = False
 
+        # Freeze class token so prefix frozen transformer layers do not receive
+        # a requires_grad=True input and build an unnecessary autograd graph
+        if hasattr(self, "class_token") and self.class_token is not None:
+            self.class_token.requires_grad = False
+
         # Freeze transformer layers 0 to (freeze_until - 1)
         for i, layer in enumerate(self.transformer_encoder.layers):
             if i < freeze_until:
@@ -659,6 +675,11 @@ class TransformerModel(nn.Module):
             trainable = sum(p.numel() for p in self.block_encoding.parameters() if p.requires_grad)
             frozen = sum(p.numel() for p in self.block_encoding.parameters() if not p.requires_grad)
             status["block_encoding"] = {"trainable": trainable, "frozen": frozen}
+
+        if hasattr(self, "class_token") and self.class_token is not None:
+            trainable = self.class_token.numel() if self.class_token.requires_grad else 0
+            frozen = 0 if self.class_token.requires_grad else self.class_token.numel()
+            status["class_token"] = {"trainable": trainable, "frozen": frozen}
 
         for i, layer in enumerate(self.transformer_encoder.layers):
             trainable = sum(p.numel() for p in layer.parameters() if p.requires_grad)

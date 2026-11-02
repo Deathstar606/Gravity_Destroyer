@@ -1,5 +1,5 @@
 device: xpu
-num_workers: 4
+num_workers: 2
 runtime_limits:
   max_time_per_run: 1000000
   max_epochs_per_run: 50

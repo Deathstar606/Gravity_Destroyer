@@ -249,7 +249,12 @@ class BasePosteriorModel(ABC):
             
         # 4. Standardize self.device as a proper torch.device object
         self.device = torch.device(device_str)
-        
+
+        if "xpu" in device_str and self.network is not None:
+            for _, buf in self.network.named_buffers():
+                if buf.dtype == torch.float64:
+                    buf.data = buf.data.to(torch.float32)
+
         print(f"Putting posterior model to device {self.device}.")
         self.network.to(self.device)
 
@@ -261,8 +266,11 @@ class BasePosteriorModel(ABC):
         and self.scheduler_kwargs, respectively.
         """
         if self.optimizer_kwargs is not None:
+            trainable_params = [
+                p for p in self.network.parameters() if p.requires_grad
+            ]
             self.optimizer = utils.get_optimizer_from_kwargs(
-                self.network.parameters(), **self.optimizer_kwargs
+                trainable_params, **self.optimizer_kwargs
             )
         if self.scheduler_kwargs is not None:
             # Number of optimizer steps per epoch required if scheduler updates are performed per optimizer step
@@ -300,16 +308,30 @@ class BasePosteriorModel(ABC):
             "logging_info": self.logging_info,
         }
 
-        # Remove DDP wrapper
-        if any("module." in key for key in self.network.state_dict()):
-            # Remove "module." prefix from the state_dict keys
-            model_state_dict = {
-                k.replace("module.", ""): v
-                for k, v in self.network.state_dict().items()
-            }
-            model_dict["model_state_dict"] = model_state_dict
-        else:
-            model_dict["model_state_dict"] = self.network.state_dict()
+        def _tensor_to_cpu(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().to("cpu", copy=True)
+            elif isinstance(obj, dict):
+                return {k: _tensor_to_cpu(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [_tensor_to_cpu(v) for v in obj]
+            elif isinstance(obj, tuple):
+                return tuple(_tensor_to_cpu(v) for v in obj)
+            return obj
+
+        # Synchronize device before saving to ensure all pending kernels/copies finish
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
+
+        # Ensure all state dict tensors are cleanly copied to CPU
+        raw_state_dict = self.network.state_dict()
+        model_state_dict = OrderedDict()
+        for k, v in raw_state_dict.items():
+            key = k.replace("module.", "")
+            model_state_dict[key] = (
+                v.detach().to("cpu", copy=True) if isinstance(v, torch.Tensor) else v
+            )
+        model_dict["model_state_dict"] = model_state_dict
 
         if self.metadata is not None:
             model_dict["metadata"] = self.metadata
@@ -324,9 +346,17 @@ class BasePosteriorModel(ABC):
             model_dict["optimizer_kwargs"] = self.optimizer_kwargs
             model_dict["scheduler_kwargs"] = self.scheduler_kwargs
             if self.optimizer is not None:
-                model_dict["optimizer_state_dict"] = self.optimizer.state_dict()
+                model_dict["optimizer_state_dict"] = _tensor_to_cpu(
+                    self.optimizer.state_dict()
+                )
             if self.scheduler is not None:
-                model_dict["scheduler_state_dict"] = self.scheduler.state_dict()
+                model_dict["scheduler_state_dict"] = _tensor_to_cpu(
+                    self.scheduler.state_dict()
+                )
+
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
+            torch.xpu.empty_cache()
 
         torch.save(model_dict, model_filename)
 
@@ -421,62 +451,39 @@ class BasePosteriorModel(ABC):
             if self.network is None:
                 self.initialize_network()
 
-            is_beyond_gr = (
-                load_embedding_only
-                or self.model_kwargs.get("posterior_kwargs", {}).get("beyond_gr", False)
-                or self.model_kwargs.get("beyond_gr_checkpoint") is not None
-                or (self.metadata and "beyond_gr_checkpoint" in self.metadata.get("train_settings", {}).get("model", {}))
-            )
-
             state_dict = d["model_state_dict"]
             current_state_dict = self.network.state_dict()
 
-            if is_beyond_gr or load_embedding_only:
-                compatible_state_dict = {}
-                skipped_keys = []
+            is_beyond_gr = (
+                self.model_kwargs.get("posterior_kwargs", {}).get("beyond_gr", False)
+                or self.model_kwargs.get("beyond_gr_checkpoint") is not None
+                or (
+                    self.metadata
+                    and "beyond_gr_checkpoint"
+                    in self.metadata.get("train_settings", {}).get("model", {})
+                )
+            )
+            state_dict_matches = (
+                set(state_dict.keys()) == set(current_state_dict.keys())
+                and all(
+                    state_dict[k].shape == current_state_dict[k].shape
+                    for k in state_dict
+                )
+            )
 
-                for k, v in state_dict.items():
-                    # Skip all flow parameters from checkpoint
-                    if k.startswith("flow."):
-                        skipped_keys.append((k, "flow"))
-                        continue
-                    if k not in current_state_dict:
-                        skipped_keys.append((k, "missing_in_current_model"))
-                        continue
-                    if v.shape != current_state_dict[k].shape:
-                        skipped_keys.append(
-                            (
-                                k,
-                                f"shape mismatch: checkpoint={tuple(v.shape)}, "
-                                f"current={tuple(current_state_dict[k].shape)}",
-                            )
-                        )
-                        continue
-                    compatible_state_dict[k] = v
-
-                self.network.load_state_dict(compatible_state_dict, strict=False)
-                self.network_to_device(device)
-                self.network.eval()
-
-                flow_initial_layers = [
-                    (name, list(param.shape))
-                    for name, param in self.network.named_parameters()
-                    if name.startswith("flow.") and "initial_layer.weight" in name
-                ]
-
-                print("\n" + "=" * 80)
-                print("DINGO CHECKPOINT LOAD (EMBEDDING-ONLY / BEYOND-GR)")
-                print("=" * 80)
-                print(f"Checkpoint total parameters   : {len(state_dict)}")
-                print(f"Loaded embedding parameters   : {len(compatible_state_dict)}")
-                print(f"Skipped parameters            : {len(skipped_keys)}")
-                flow_skipped = [item for item in skipped_keys if item[1] == "flow"]
-                print(f"Checkpoint flow.* keys skipped: {len(flow_skipped)}")
-                print(f"New flow initial layers count : {len(flow_initial_layers)}")
-                for name, shape in flow_initial_layers[:3]:
-                    print(f"  {name}: shape == {shape}")
-                print("=" * 80 + "\n")
-
+            if load_embedding_only:
+                self.load_embedding_weights_only(
+                    model_filename=model_filename,
+                    device=device,
+                )
+            elif is_beyond_gr and not state_dict_matches:
+                # Fallback for hybrid checkpoints (e.g. dingo_t1.pt) whose flow.*
+                # weights have different dimensions from the 1D Beyond-GR flow
+                self.load_embedding_weights_only(
+                    model_filename=model_filename,
+                    device=device,
+                    freeze_all_except_last_n_layers=0,
+                )
             else:
                 self.network.load_state_dict(d["model_state_dict"])
                 self.network_to_device(device)
@@ -494,15 +501,32 @@ class BasePosteriorModel(ABC):
                 else:
                     self.network.eval()
 
-    def load_embedding_weights_only(self, model_filename: str, device: str = "xpu"):
+    def load_embedding_weights_only(
+        self,
+        model_filename: str,
+        device: str = "xpu",
+        freeze_all_except_last_n_layers: Optional[int] = None,
+    ):
         """
-        Load weights from a saved posterior model, EXCLUDING the original normalizing flow weights.
-        This is used to load shared feature extraction components (Transformer, Tokenizer, etc.)
-        while initializing a new 2D flow from scratch.
+        Load weights from a saved posterior model checkpoint based on
+        `freeze_all_except_last_n_layers`:
+        - If `freeze_all_except_last_n_layers == 0`: skip all `flow.*` weights and load
+          only compatible embedding network weights (e.g. from `dingo_t1.pt`).
+        - If `freeze_all_except_last_n_layers > 0`: load the entire model weights
+          (both `embedding_net.*` and `flow.*`) from `model_stage_0.pt`.
         """
         if self.network is None:
             self.initialize_network()
-            
+
+        if freeze_all_except_last_n_layers is None:
+            freeze_all_except_last_n_layers = (
+                (self.metadata or {})
+                .get("train_settings", {})
+                .get("training", {})
+                .get("stage_0", {})
+                .get("freeze_all_except_last_n_layers", 0)
+            )
+
         ext = os.path.splitext(model_filename)[-1]
         if ext == ".pt":
             d = torch.load(model_filename, map_location="cpu")
@@ -513,6 +537,38 @@ class BasePosteriorModel(ABC):
 
         state_dict = d["model_state_dict"]
         current_state_dict = self.network.state_dict()
+
+        if (
+            freeze_all_except_last_n_layers is not None
+            and freeze_all_except_last_n_layers > 0
+        ):
+            if device != "meta":
+                self.network.load_state_dict(state_dict, strict=True)
+                self.network_to_device(device)
+                self.network.eval()
+
+            flow_loaded = [k for k in state_dict.keys() if k.startswith("flow.")]
+            emb_loaded = [k for k in state_dict.keys() if not k.startswith("flow.")]
+            total_ckpt_params = len(state_dict)
+
+            del d, state_dict, current_state_dict
+            import gc
+            gc.collect()
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                torch.xpu.empty_cache()
+
+            print("\n" + "=" * 80)
+            print(
+                f"DINGO FULL MODEL LOAD (freeze_all_except_last_n_layers={freeze_all_except_last_n_layers} > 0)"
+            )
+            print("=" * 80)
+            print(f"Checkpoint file               : {model_filename}")
+            print(f"Checkpoint total parameters   : {total_ckpt_params}")
+            print(f"Loaded embedding parameters   : {len(emb_loaded)}")
+            print(f"Loaded flow.* parameters      : {len(flow_loaded)}")
+            print(f"Skipped parameters            : 0")
+            print("=" * 80 + "\n")
+            return
 
         compatible_state_dict = {}
         skipped_keys = []
@@ -529,11 +585,14 @@ class BasePosteriorModel(ABC):
                     (
                         k,
                         f"shape mismatch: checkpoint={tuple(v.shape)}, "
-                        f"current={tuple(current_state_dict[k].shape)}"
+                        f"current={tuple(current_state_dict[k].shape)}",
                     )
                 )
                 continue
             compatible_state_dict[k] = v
+
+        total_ckpt_params = len(state_dict)
+        num_loaded = len(compatible_state_dict)
 
         if device != "meta":
             self.network.load_state_dict(
@@ -542,6 +601,12 @@ class BasePosteriorModel(ABC):
             )
             self.network_to_device(device)
             self.network.eval()
+
+        del d, state_dict, current_state_dict, compatible_state_dict
+        import gc
+        gc.collect()
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
 
         flow_initial_layers = [
             (name, list(param.shape))
@@ -552,8 +617,9 @@ class BasePosteriorModel(ABC):
         print("\n" + "=" * 80)
         print("DINGO EMBEDDING-ONLY LOAD")
         print("=" * 80)
-        print(f"Checkpoint parameters         : {len(state_dict)}")
-        print(f"Loaded embedding parameters   : {len(compatible_state_dict)}")
+        print(f"Checkpoint file               : {model_filename}")
+        print(f"Checkpoint parameters         : {total_ckpt_params}")
+        print(f"Loaded embedding parameters   : {num_loaded}")
         print(f"Skipped parameters            : {len(skipped_keys)}")
         flow_skipped = [item for item in skipped_keys if item[1] == "flow"]
         print(f"Checkpoint flow.* keys skipped: {len(flow_skipped)}")
